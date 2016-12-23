@@ -32,6 +32,8 @@ type Stream struct {
 	Logger *log.Logger
 	// The maximum time to wait between reconnection attempts
 	maxReconnectionTime time.Duration
+	// Force a reconnect if no message is received in this period of time
+	reconnectAfter time.Duration
 }
 
 type SubscriptionError struct {
@@ -45,17 +47,17 @@ func (e SubscriptionError) Error() string {
 
 // Subscribe to the Events emitted from the specified url.
 // If lastEventId is non-empty it will be sent to the server in case it can replay missed events.
-func Subscribe(url, lastEventId string) (*Stream, error) {
+func Subscribe(url, lastEventId string, reconnectAfter time.Duration) (*Stream, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	return SubscribeWithRequest(lastEventId, req)
+	return SubscribeWithRequest(lastEventId, req, reconnectAfter)
 }
 
 // SubscribeWithRequest will take an http.Request to setup the stream, allowing custom headers
 // to be specified, authentication to be configured, etc.
-func SubscribeWithRequest(lastEventId string, req *http.Request) (*Stream, error) {
+func SubscribeWithRequest(lastEventId string, req *http.Request, reconnectAfter time.Duration) (*Stream, error) {
 	stream := &Stream{
 		req:                 req,
 		lastEventId:         lastEventId,
@@ -64,6 +66,7 @@ func SubscribeWithRequest(lastEventId string, req *http.Request) (*Stream, error
 		Errors:              make(chan error),
 		Comments:            make(chan string),
 		maxReconnectionTime: (time.Millisecond * 30000),
+		reconnectAfter:      reconnectAfter,
 	}
 	stream.c.CheckRedirect = checkRedirect
 
@@ -143,7 +146,7 @@ func (stream *Stream) stream(r io.ReadCloser) {
 	defer r.Close()
 	dec := NewDecoder(r)
 	for {
-		ev, comment, err := dec.Decode()
+		ev, comment, err := dec.Decode(stream.reconnectAfter)
 
 		if err != nil {
 			stream.Errors <- err

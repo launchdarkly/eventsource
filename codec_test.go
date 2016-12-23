@@ -3,6 +3,7 @@ package eventsource
 import (
 	"bytes"
 	"testing"
+	"time"
 )
 
 type testEvent struct {
@@ -31,7 +32,7 @@ func TestRoundTrip(t *testing.T) {
 		if err := enc.Encode(want); err != nil {
 			t.Fatal(err)
 		}
-		ev, _, err := dec.Decode()
+		ev, _, err := dec.Decode(0 * time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}

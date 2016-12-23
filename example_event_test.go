@@ -41,7 +41,7 @@ func ExampleEvent() {
 	http.HandleFunc("/time", srv.Handler("time"))
 	go http.Serve(l, nil)
 	go TimePublisher(srv)
-	stream, err := eventsource.Subscribe("http://127.0.0.1:8080/time", "")
+	stream, err := eventsource.Subscribe("http://127.0.0.1:8080/time", "", 0*time.Second)
 	if err != nil {
 		return
 	}

@@ -2,9 +2,11 @@ package eventsource_test
 
 import (
 	"fmt"
-	"github.com/launchdarkly/eventsource"
 	"net"
 	"net/http"
+	"time"
+
+	"github.com/launchdarkly/eventsource"
 )
 
 func ExampleErrorHandlingStream() {
@@ -18,7 +20,7 @@ func ExampleErrorHandlingStream() {
 	})
 	go http.Serve(listener, nil)
 
-	_, err = eventsource.Subscribe("http://127.0.0.1:8080/stream", "")
+	_, err = eventsource.Subscribe("http://127.0.0.1:8080/stream", "", 0*time.Second)
 	if err != nil {
 		if serr, ok := err.(eventsource.SubscriptionError); ok {
 			fmt.Printf("Status code: %d\n", serr.Code)
