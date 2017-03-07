@@ -113,7 +113,7 @@ func (srv *Server) Register(channel string, repo Repository) {
 func (srv *Server) Publish(channels []string, ev Event) {
 	srv.pub <- &outbound{
 		channels: channels,
-		event:    ev,
+		event:    makeCachedEncodingEvent(ev),
 	}
 }
 

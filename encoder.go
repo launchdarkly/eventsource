@@ -38,18 +38,26 @@ func NewEncoder(w io.Writer, compressed bool) *Encoder {
 // Encode writes an event in the format specified by the
 // server-sent events protocol.
 func (enc *Encoder) Encode(ev Event) error {
-	for _, field := range encFields {
-		prefix, value := field.prefix, field.value(ev)
-		if len(value) == 0 {
-			continue
-		}
-		value = strings.Replace(value, "\n", "\n"+prefix, -1)
-		if _, err := io.WriteString(enc.w, prefix+value+"\n"); err != nil {
+	if cev, ok := ev.(cachedEncodingEvent); ok {
+		data := cev.Encode()
+		if _, err := enc.w.Write(data); err != nil {
 			return fmt.Errorf("eventsource encode: %v", err)
 		}
-	}
-	if _, err := io.WriteString(enc.w, "\n"); err != nil {
-		return fmt.Errorf("eventsource encode: %v", err)
+	} else {
+
+		for _, field := range encFields {
+			prefix, value := field.prefix, field.value(ev)
+			if len(value) == 0 {
+				continue
+			}
+			value = strings.Replace(value, "\n", "\n"+prefix, -1)
+			if _, err := io.WriteString(enc.w, prefix+value+"\n"); err != nil {
+				return fmt.Errorf("eventsource encode: %v", err)
+			}
+		}
+		if _, err := io.WriteString(enc.w, "\n"); err != nil {
+			return fmt.Errorf("eventsource encode: %v", err)
+		}
 	}
 	if enc.compressed {
 		return enc.w.(*gzip.Writer).Flush()

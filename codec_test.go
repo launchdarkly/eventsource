@@ -42,3 +42,43 @@ func TestRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestCachedRoundTrip(t *testing.T) {
+	buf := new(bytes.Buffer)
+	enc := NewEncoder(buf, false)
+	dec := NewDecoder(buf)
+	for _, tt := range encoderTests {
+		want := tt.event
+		if err := enc.Encode(makeCachedEncodingEvent(want)); err != nil {
+			t.Fatal(err)
+		}
+		if buf.String() != tt.output {
+			t.Errorf("Expected: %s Got: %s", tt.output, buf.String())
+		}
+		ev, err := dec.Decode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.Id() != want.Id() || ev.Event() != want.Event() || ev.Data() != want.Data() {
+			t.Errorf("Expected: %s %s %s Got: %s %s %s", want.Id(), want.Event(), want.Data(), ev.Id(), ev.Event(), ev.Data())
+		}
+	}
+}
+
+func BenchmarkEncoding(b *testing.B) {
+	event := encoderTests[0].event
+	for n := 0; n < b.N; n++ {
+		buf := new(bytes.Buffer)
+		enc := NewEncoder(buf, false)
+		enc.Encode(event)
+	}
+}
+
+func BenchmarkCachedEncoding(b *testing.B) {
+	event := makeCachedEncodingEvent(encoderTests[0].event)
+	for n := 0; n < b.N; n++ {
+		buf := new(bytes.Buffer)
+		enc := NewEncoder(buf, false)
+		enc.Encode(event)
+	}
+}
