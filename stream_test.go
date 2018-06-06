@@ -154,13 +154,10 @@ func TestStreamReconnectWithReportSendsBodyTwice(t *testing.T) {
 		connections <- struct{}{}
 		ticker := time.NewTicker(time.Millisecond)
 		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				// Just send comments
-				if _, err := w.Write([]byte(":\n")); err != nil {
-					return
-				}
+		for range ticker.C {
+			// Just send comments
+			if _, err := w.Write([]byte(":\n")); err != nil {
+				return
 			}
 		}
 	}))
