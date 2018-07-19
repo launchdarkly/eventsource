@@ -61,10 +61,6 @@ func SubscribeWithRequest(lastEventId string, request *http.Request) (*Stream, e
 // control over the http client settings (timeouts, tls, etc)
 // If request.Body is set, then request.GetBody should also be set so that we can reissue the request
 func SubscribeWith(lastEventId string, client *http.Client, request *http.Request) (*Stream, error) {
-	// override checkRedirect to include headers before go1.8
-	// we'd prefer to skip this because it is not thread-safe and breaks golang race condition checking
-	setCheckRedirect(client)
-
 	stream := &Stream{
 		c:           client,
 		req:         request,
@@ -122,22 +118,22 @@ func (stream *Stream) connect() (r io.ReadCloser, err error) {
 }
 
 func (stream *Stream) stream(r io.ReadCloser) {
-	retryChan := make(chan struct{}, 1)
+	reconnectChan := make(chan struct{}, 1)
 
-	scheduleRetry := func(backoff *time.Duration) {
+	scheduleReconnect := func(backOff *time.Duration) {
 		logger := stream.getLogger()
 		if logger != nil {
-			logger.Printf("Reconnecting in %0.4f secs\n", backoff.Seconds())
+			logger.Printf("Reconnecting in %0.4f secs\n", backOff.Seconds())
 		}
-		time.AfterFunc(*backoff, func() {
-			retryChan <- struct{}{}
+		time.AfterFunc(*backOff, func() {
+			reconnectChan <- struct{}{}
 		})
-		*backoff *= 2
+		*backOff *= 2
 	}
 
 NewStream:
 	for {
-		backoff := stream.getRetry()
+		backOff := stream.getRetry()
 		events := make(chan Event)
 		errs := make(chan error)
 
@@ -160,43 +156,44 @@ NewStream:
 
 		for {
 			select {
+			// decode errors
 			case err := <-errs:
 				stream.Errors <- err
 				r.Close()
 				r = nil
-				scheduleRetry(&backoff)
+				scheduleReconnect(&backOff)
 				continue NewStream
+
+			// events
 			case ev := <-events:
 				pub := ev.(*publication)
 				if pub.Retry() > 0 {
-					backoff = time.Duration(pub.Retry()) * time.Millisecond
+					backOff = time.Duration(pub.Retry()) * time.Millisecond
 				}
 				if len(pub.Id()) > 0 {
 					stream.lastEventId = pub.Id()
 				}
 				stream.Events <- ev
+
+			// external stream close
 			case <-stream.closer:
 				if r != nil {
 					r.Close()
 					// allow the decoding goroutine to terminate
-					for {
-						if _, ok := <-errs; !ok {
-							break
-						}
+					for range errs {
 					}
-					for {
-						if _, ok := <-events; !ok {
-							break
-						}
+					for range events {
 					}
 				}
 				break NewStream
-			case <-retryChan:
+
+			// reconnect
+			case <-reconnectChan:
 				var err error
 				r, err = stream.connect()
 				if err != nil {
 					stream.Errors <- err
-					scheduleRetry(&backoff)
+					scheduleReconnect(&backOff)
 				}
 				continue NewStream
 			}
