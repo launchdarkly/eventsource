@@ -61,7 +61,6 @@ func SubscribeWithRequest(lastEventId string, request *http.Request) (*Stream, e
 // control over the http client settings (timeouts, tls, etc)
 // If request.Body is set, then request.GetBody should also be set so that we can reissue the request
 func SubscribeWith(lastEventId string, client *http.Client, request *http.Request) (*Stream, error) {
-
 	// override checkRedirect to include headers before go1.8
 	// we'd prefer to skip this because it is not thread-safe and breaks golang race condition checking
 	setCheckRedirect(client)
