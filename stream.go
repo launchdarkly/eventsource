@@ -120,7 +120,7 @@ func (stream *Stream) connect() (io.ReadCloser, error) {
 		}
 		return nil, err
 	}
-	return resp.Body, err
+	return resp.Body, nil
 }
 
 func (stream *Stream) stream(r io.ReadCloser) {
