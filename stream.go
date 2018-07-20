@@ -91,7 +91,8 @@ func (stream *Stream) Close() {
 	})
 }
 
-func (stream *Stream) connect() (r io.ReadCloser, err error) {
+func (stream *Stream) connect() (io.ReadCloser, error) {
+	var err error
 	var resp *http.Response
 	stream.req.Header.Set("Cache-Control", "no-cache")
 	stream.req.Header.Set("Accept", "text/event-stream")
@@ -103,12 +104,12 @@ func (stream *Stream) connect() (r io.ReadCloser, err error) {
 	// All but the initial connection will need to regenerate the body
 	if stream.connections > 0 && req.GetBody != nil {
 		if req.Body, err = req.GetBody(); err != nil {
-			return
+			return nil, err
 		}
 	}
 
 	if resp, err = stream.c.Do(&req); err != nil {
-		return
+		return nil, err
 	}
 	stream.connections++
 	if resp.StatusCode != 200 {
@@ -118,10 +119,9 @@ func (stream *Stream) connect() (r io.ReadCloser, err error) {
 			Code:    resp.StatusCode,
 			Message: string(message),
 		}
-	} else {
-		r = resp.Body
+		return nil, err
 	}
-	return
+	return resp.Body, err
 }
 
 func (stream *Stream) stream(r io.ReadCloser) {
