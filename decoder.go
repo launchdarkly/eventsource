@@ -25,7 +25,7 @@ type Decoder struct {
 // NewDecoder returns a new Decoder instance that reads events
 // with the given io.Reader.
 func NewDecoder(r io.Reader) *Decoder {
-	dec := &Decoder{bufio.NewReader(newNormaliser(r))}
+	dec := &Decoder{Reader: bufio.NewReader(newNormaliser(r))}
 	return dec
 }
 

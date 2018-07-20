@@ -113,12 +113,14 @@ func (stream *Stream) connect() (r io.ReadCloser, err error) {
 	stream.connections++
 	if resp.StatusCode != 200 {
 		message, _ := ioutil.ReadAll(resp.Body)
+		_ = resp.Body.Close()
 		err = SubscriptionError{
 			Code:    resp.StatusCode,
 			Message: string(message),
 		}
+	} else {
+		r = resp.Body
 	}
-	r = resp.Body
 	return
 }
 
@@ -164,7 +166,7 @@ NewStream:
 			// decode errors
 			case err := <-errs:
 				stream.Errors <- err
-				r.Close()
+				_ = r.Close()
 				r = nil
 				scheduleReconnect(&backOff)
 				continue NewStream
@@ -183,7 +185,7 @@ NewStream:
 			// external stream close
 			case <-stream.closer:
 				if r != nil {
-					r.Close()
+					_ = r.Close()
 					// allow the decoding goroutine to terminate
 					for range errs {
 					}
@@ -197,6 +199,7 @@ NewStream:
 				var err error
 				r, err = stream.connect()
 				if err != nil {
+					r = nil
 					stream.Errors <- err
 					scheduleReconnect(&backOff)
 				}
@@ -209,7 +212,7 @@ NewStream:
 	close(stream.Events)
 }
 
-func (stream *Stream) setRetry(retry time.Duration) {
+func (stream *Stream) setRetry(retry time.Duration) { // nolint:megacheck // unused except by tests
 	stream.mu.Lock()
 	defer stream.mu.Unlock()
 	stream.retry = retry
