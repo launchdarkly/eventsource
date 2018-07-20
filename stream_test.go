@@ -207,7 +207,7 @@ func TestStreamCloseWhileReconnecting(t *testing.T) {
 	httpServer := httptest.NewServer(server.Handler(eventChannelName))
 
 	stream := mustSubscribe(t, httpServer.URL, "")
-	stream.setRetry(time.Minute)
+	stream.setRetry(time.Hour)
 	publishedEvent := &publication{id: "123"}
 	server.Publish([]string{eventChannelName}, publishedEvent)
 

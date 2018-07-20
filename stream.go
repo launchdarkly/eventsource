@@ -124,22 +124,22 @@ func (stream *Stream) connect() (io.ReadCloser, error) {
 }
 
 func (stream *Stream) stream(r io.ReadCloser) {
-	reconnectChan := make(chan struct{}, 1)
+	retryChan := make(chan struct{}, 1)
 
-	scheduleReconnect := func(backOff *time.Duration) {
+	scheduleRetry := func(backoff *time.Duration) {
 		logger := stream.getLogger()
 		if logger != nil {
-			logger.Printf("Reconnecting in %0.4f secs\n", backOff.Seconds())
+			logger.Printf("Reconnecting in %0.4f secs\n", backoff.Seconds())
 		}
-		time.AfterFunc(*backOff, func() {
-			reconnectChan <- struct{}{}
+		time.AfterFunc(*backoff, func() {
+			retryChan <- struct{}{}
 		})
-		*backOff *= 2
+		*backoff *= 2
 	}
 
 NewStream:
 	for {
-		backOff := stream.getRetry()
+		backoff := stream.getRetry()
 		events := make(chan Event)
 		errs := make(chan error)
 
@@ -162,26 +162,21 @@ NewStream:
 
 		for {
 			select {
-			// decode errors
 			case err := <-errs:
 				stream.Errors <- err
 				_ = r.Close()
 				r = nil
-				scheduleReconnect(&backOff)
+				scheduleRetry(&backoff)
 				continue NewStream
-
-			// events
 			case ev := <-events:
 				pub := ev.(*publication)
 				if pub.Retry() > 0 {
-					backOff = time.Duration(pub.Retry()) * time.Millisecond
+					backoff = time.Duration(pub.Retry()) * time.Millisecond
 				}
 				if len(pub.Id()) > 0 {
 					stream.lastEventId = pub.Id()
 				}
 				stream.Events <- ev
-
-			// external stream close
 			case <-stream.closer:
 				if r != nil {
 					_ = r.Close()
@@ -192,15 +187,13 @@ NewStream:
 					}
 				}
 				break NewStream
-
-			// reconnect
-			case <-reconnectChan:
+			case <-retryChan:
 				var err error
 				r, err = stream.connect()
 				if err != nil {
 					r = nil
 					stream.Errors <- err
-					scheduleReconnect(&backOff)
+					scheduleRetry(&backoff)
 				}
 				continue NewStream
 			}
