@@ -16,9 +16,10 @@ linter-settings:
 
 issues:
   exclude:
-  - "(func|method|struct field|type|var) .* should be " # golint errors about variable names (don't want to fix them because they're in a public interface)
+  # gas
   - "G104: Errors unhandled." # Let errcheck handle these
   # golint
+  - "(func|method|struct field|type|var) .* should be " # golint errors about variable names (don't want to fix them because they're in a public interface)
   - "Comment on exported"
   - "exported .* should have comment or be unexported"
   exclude-use-default: false
