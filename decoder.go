@@ -49,33 +49,23 @@ func (dec *Decoder) Decode() (Event, error) {
 	var timeoutCh <-chan time.Time
 	if dec.readTimeout > 0 {
 		timeoutTimer = time.NewTimer(dec.readTimeout)
+		defer timeoutTimer.Stop()
 		timeoutCh = timeoutTimer.C
-	}
-	resetTimeout := func(reset bool) {
-		if timeoutTimer != nil {
-			if !timeoutTimer.Stop() {
-				<-timeoutCh
-			}
-			if reset {
-				timeoutTimer.Reset(dec.readTimeout)
-			}
-		}
 	}
 ReadLoop:
 	for {
 		select {
 		case line := <-dec.linesCh:
-			resetTimeout(true)
 			if line == "\n" && inDecoding {
 				// the empty line signals the end of an event
 				break ReadLoop
 			} else if line == "\n" && !inDecoding {
 				// only a newline was sent, so we don't want to publish an empty event but try to read again
-				continue ReadLoop
+				break
 			}
 			line = strings.TrimSuffix(line, "\n")
 			if strings.HasPrefix(line, ":") {
-				continue ReadLoop
+				break
 			}
 			sections := strings.SplitN(line, ":", 2)
 			field, value := sections[0], ""
@@ -94,7 +84,6 @@ ReadLoop:
 				pub.retry, _ = strconv.ParseInt(value, 10, 64)
 			}
 		case err := <-dec.errorCh:
-			resetTimeout(false)
 			if err == io.ErrUnexpectedEOF && !inDecoding {
 				// if we're not in the middle of an event then just return EOF
 				err = io.EOF
@@ -105,6 +94,12 @@ ReadLoop:
 			return nil, err
 		case <-timeoutCh:
 			return nil, ErrReadTimeout
+		}
+		if timeoutTimer != nil {
+			if !timeoutTimer.Stop() {
+				<-timeoutCh
+			}
+			timeoutTimer.Reset(dec.readTimeout)
 		}
 	}
 	pub.data = strings.TrimSuffix(pub.data, "\n")
