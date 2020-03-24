@@ -56,20 +56,24 @@ func (s defaultBackoffStrategy) applyBackoff(baseDelay time.Duration, retryCount
 }
 
 type defaultJitterStrategy struct {
+	ratio  float64
 	random *rand.Rand
 }
 
 // Creates the default implementation of jitter, which subtracts up to 50% from each delay.
-func newDefaultJitter(randSeed int64) jitterStrategy {
+func newDefaultJitter(ratio float64, randSeed int64) jitterStrategy {
 	if randSeed <= 0 {
 		randSeed = time.Now().UnixNano()
 	}
-	return &defaultJitterStrategy{rand.New(rand.NewSource(randSeed))}
+	if ratio > 1.0 {
+		ratio = 1.0
+	}
+	return &defaultJitterStrategy{ratio, rand.New(rand.NewSource(randSeed))}
 }
 
 func (s *defaultJitterStrategy) applyJitter(computedDelay time.Duration) time.Duration {
 	// retryCount doesn't matter here - it's included in the int
-	jitter := time.Duration(s.random.Int63n(int64(computedDelay) / 2))
+	jitter := time.Duration(s.random.Int63n(int64(float64(computedDelay) * s.ratio)))
 	return computedDelay - jitter
 }
 

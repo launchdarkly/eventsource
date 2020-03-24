@@ -10,10 +10,9 @@ type streamOptions struct {
 	httpClient              *http.Client
 	lastEventID             string
 	logger                  Logger
-	useBackoff              bool
-	useJitter               bool
+	backoffMaxDelay         time.Duration
+	jitterRatio             float64
 	canRetryFirstConnection bool
-	maxRetry                time.Duration
 	readTimeout             time.Duration
 	retryResetInterval      time.Duration
 	initialRetryTimeout     time.Duration
@@ -67,37 +66,28 @@ func StreamOptionInitialRetry(retry time.Duration) StreamOption {
 	return initialRetryOption{retry: retry}
 }
 
-type maxRetryOption struct {
-	maxRetry time.Duration
-}
-
-func (o maxRetryOption) apply(s *streamOptions) error {
-	s.maxRetry = o.maxRetry
-	return nil
-}
-
 type useBackoffOption struct {
-	value bool
+	maxDelay time.Duration
 }
 
 func (o useBackoffOption) apply(s *streamOptions) error {
-	s.useBackoff = o.value
+	s.backoffMaxDelay = o.maxDelay
 	return nil
 }
 
 // StreamOptionUseBackoff returns an option that determines whether to use an exponential
 // backoff for reconnection delays.
 //
-// If enabled, the retry delay interval will be doubled (not counting jitter - see
-// StreamOptionUseJitter) for consecutive stream reconnections, subject to the limit
-// specified by StreamOptionMaxRetry.
+// If the maxDelay parameter is greater than zero, backoff is enabled. The retry delay interval
+// will be doubled (not counting jitter - see StreamOptionUseJitter) for consecutive stream
+// reconnections, but will never be greater than maxDelay.
 //
-// For consistency with earlier versions, this is currently disabled (false) by default. In
-// a future version it will default to enabled (true), so if you do not want backoff
-// behavior you should explicitly set it to false. It is recommended to use both backoff
-// and jitter, to avoid "thundering herd" behavior in the case of a server outage.
-func StreamOptionUseBackoff(useBackoff bool) StreamOption {
-	return useBackoffOption{useBackoff}
+// For consistency with earlier versions, this is currently zero (disabled) by default. In
+// a future version this may change, so if you do not want backoff behavior you should explicitly
+// set it to zero. It is recommended to use both backoff and jitter, to avoid "thundering herd"
+// behavior in the case of a server outage.
+func StreamOptionUseBackoff(maxDelay time.Duration) StreamOption {
+	return useBackoffOption{maxDelay}
 }
 
 type canRetryFirstConnectionOption struct {
@@ -124,38 +114,28 @@ func StreamOptionCanRetryFirstConnection(initialRetryTimeout time.Duration) Stre
 }
 
 type useJitterOption struct {
-	value bool
+	jitterRatio float64
 }
 
 func (o useJitterOption) apply(s *streamOptions) error {
-	s.useJitter = o.value
+	s.jitterRatio = o.jitterRatio
 	return nil
 }
 
 // StreamOptionUseJitter returns an option that determines whether to use a randomized
 // jitter for reconnection delays.
 //
-// If enabled, then whatever retry delay interval would otherwise be used is randomly
-// decreased by up to 50%.
+// If jitterRatio is greater than zero, it represents a proportion up to 1.0 (100%) that will
+// be deducted from the retry delay interval would otherwise be used: for instance, 0.5 means
+// that the delay will be randomly decreased by up to 50%. A value greater than 1.0 is treated
+// as equal to 1.0.
 //
-// For consistency with earlier versions, this is currently disabled (false) by default. In
-// a future version it will default to enabled (true), so if you do not want jitter you
-// should explicitly set it to false. It is recommended to use both backoff and jitter, to
-// avoid "thundering herd" behavior in the case of a server outage.
-func StreamOptionUseJitter(useJitter bool) StreamOption {
-	return useJitterOption{useJitter}
-}
-
-// StreamOptionMaxRetry returns an option that sets the maximum retry delay for a
-// stream when the stream is created. This is only relevant if backoff is enabled (see
-// StreamOptionUseBackoff).
-//
-// If the stream has to be restarted multiple times, the retry delay interval will increase
-// using an exponential backoff interval but will never be longer than this maximum.
-//
-// The default value is DefaultMaxRetry.
-func StreamOptionMaxRetry(maxRetry time.Duration) StreamOption {
-	return maxRetryOption{maxRetry: maxRetry}
+// For consistency with earlier versions, this is currently disabled (zero) by default. In
+// a future version this may change, so if you do not want jitter you should explicitly set it
+// to zero. It is recommended to use both backoff and jitter, to avoid "thundering herd"
+// behavior in the case of a server outage.
+func StreamOptionUseJitter(jitterRatio float64) StreamOption {
+	return useJitterOption{jitterRatio}
 }
 
 type retryResetIntervalOption struct {
@@ -232,8 +212,6 @@ func StreamOptionLogger(logger Logger) StreamOption {
 const (
 	// DefaultInitialRetry is the default value for StreamOptionalInitialRetry.
 	DefaultInitialRetry = time.Second * 3
-	// DefaultMaxRetry is the default value for StreamOptionMaxRetry.
-	DefaultMaxRetry = time.Second * 30
 	// DefaultRetryResetInterval is the default value for StreamOptionRetryResetInterval.
 	DefaultRetryResetInterval = time.Second * 60
 )

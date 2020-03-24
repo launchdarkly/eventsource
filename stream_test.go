@@ -343,7 +343,7 @@ func TestStreamCanUseBackoff(t *testing.T) {
 	baseDelay := time.Millisecond
 	stream := mustSubscribe(t, httpServer.URL,
 		StreamOptionInitialRetry(baseDelay),
-		StreamOptionUseBackoff(true))
+		StreamOptionUseBackoff(time.Minute))
 	defer stream.Close()
 
 	retry := stream.getRetryDelayStrategy()
@@ -365,8 +365,8 @@ func TestStreamCanUseJitter(t *testing.T) {
 	baseDelay := time.Millisecond
 	stream := mustSubscribe(t, httpServer.URL,
 		StreamOptionInitialRetry(baseDelay),
-		StreamOptionUseBackoff(true),
-		StreamOptionUseJitter(true))
+		StreamOptionUseBackoff(time.Minute),
+		StreamOptionUseJitter(0.5))
 	defer stream.Close()
 
 	retry := stream.getRetryDelayStrategy()
@@ -386,10 +386,10 @@ func TestStreamCanSetMaximumDelayWithBackoff(t *testing.T) {
 	defer close(closer)
 
 	baseDelay := time.Millisecond
+	max := baseDelay * 3
 	stream := mustSubscribe(t, httpServer.URL,
 		StreamOptionInitialRetry(baseDelay),
-		StreamOptionUseBackoff(true),
-		StreamOptionMaxRetry(baseDelay*3))
+		StreamOptionUseBackoff(max))
 	defer stream.Close()
 
 	retry := stream.getRetryDelayStrategy()
@@ -399,7 +399,7 @@ func TestStreamCanSetMaximumDelayWithBackoff(t *testing.T) {
 	d2 := retry.NextRetryDelay(time.Now())
 	assert.Equal(t, baseDelay, d0)
 	assert.Equal(t, baseDelay*2, d1)
-	assert.Equal(t, baseDelay*3, d2)
+	assert.Equal(t, max, d2)
 }
 
 func TestStreamCanChangeRetryDelayBasedOnEvent(t *testing.T) {

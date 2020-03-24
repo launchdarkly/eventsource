@@ -93,7 +93,6 @@ func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOpti
 	configuredOptions := streamOptions{
 		httpClient:         &defaultClient,
 		initialRetry:       DefaultInitialRetry,
-		maxRetry:           DefaultMaxRetry,
 		retryResetInterval: DefaultRetryResetInterval,
 	}
 
@@ -105,11 +104,11 @@ func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOpti
 
 	var backoff backoffStrategy
 	var jitter jitterStrategy
-	if configuredOptions.useBackoff {
-		backoff = newDefaultBackoff(configuredOptions.maxRetry)
+	if configuredOptions.backoffMaxDelay > 0 {
+		backoff = newDefaultBackoff(configuredOptions.backoffMaxDelay)
 	}
-	if configuredOptions.useJitter {
-		jitter = newDefaultJitter(0)
+	if configuredOptions.jitterRatio > 0 {
+		jitter = newDefaultJitter(configuredOptions.jitterRatio, 0)
 	}
 
 	stream := &Stream{

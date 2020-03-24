@@ -37,7 +37,7 @@ func TestBackoffWithoutJitter(t *testing.T) {
 func TestJitterWithoutBackoff(t *testing.T) {
 	d0 := time.Second
 	seed := int64(1000)
-	r := newRetryDelayStrategy(d0, 0, nil, newDefaultJitter(seed))
+	r := newRetryDelayStrategy(d0, 0, nil, newDefaultJitter(0.5, seed))
 	t0 := time.Now().Add(-time.Minute)
 	d1 := r.NextRetryDelay(t0)
 	d2 := r.NextRetryDelay(t0.Add(time.Second))
@@ -51,7 +51,7 @@ func TestJitterWithBackoff(t *testing.T) {
 	d0 := time.Second
 	max := time.Minute
 	seed := int64(1000)
-	r := newRetryDelayStrategy(d0, 0, newDefaultBackoff(max), newDefaultJitter(seed))
+	r := newRetryDelayStrategy(d0, 0, newDefaultBackoff(max), newDefaultJitter(0.5, seed))
 	t0 := time.Now().Add(-time.Minute)
 	d1 := r.NextRetryDelay(t0)
 	d2 := r.NextRetryDelay(t0.Add(time.Second))
