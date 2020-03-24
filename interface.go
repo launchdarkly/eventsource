@@ -36,7 +36,7 @@ type StreamErrorHandlerResult struct {
 	// CloseNow can be set to true to tell the Stream to immediately stop and not retry, as if Close had
 	// been called.
 	//
-	// If StopNow is false, the Stream will proceed as usual after an error: if there is an existing
+	// If CloseNow is false, the Stream will proceed as usual after an error: if there is an existing
 	// connection it will retry the connection, and if the Stream is still being initialized then the
 	// retry behavior is configurable (see StreamOptionCanRetryFirstConnection).
 	CloseNow bool
