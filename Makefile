@@ -4,7 +4,8 @@ GOLANGCI_VERSION=v1.10.2
 SHELL=/bin/bash
 
 test: lint
-	go test
+	go get -t ./...
+	go test -race -v ./...
 
 lint:
 	./bin/golangci-lint run ./...

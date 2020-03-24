@@ -14,12 +14,11 @@ jobs:
     steps:
       - checkout
       - run: go get -u $COMMON_GO_PACKAGES
-      - run: go get -t ./...
 
       - run: |
           mkdir -p $CIRCLE_TEST_REPORTS
           trap "go-junit-report < output.txt > $CIRCLE_TEST_REPORTS/junit.xml" EXIT
-          go test -race -v ./... | tee output.txt
+          make test | tee output.txt
 
       - run: make init && make lint
       
