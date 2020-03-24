@@ -260,6 +260,7 @@ NewStream:
 				if len(pub.Id()) > 0 {
 					stream.lastEventID = pub.Id()
 				}
+				stream.retryDelay.SetGoodSince(time.Now())
 				stream.Events <- ev
 			case <-stream.closer:
 				if r != nil {
