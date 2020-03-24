@@ -42,7 +42,12 @@ type defaultBackoffStrategy struct {
 	maxDelay time.Duration
 }
 
-// Creates the default implementation of exponential backoff, which doubles the delay each time.
+// Creates the default implementation of exponential backoff, which doubles the delay each time up to
+// the specified maximum.
+//
+// If a resetInterval was specified for the retryDelayStrategy, and the system has been in a "good"
+// state for at least that long, the delay is reset back to the base. This avoids perpetually increasing
+// delays in a situation where failures are rare).
 func newDefaultBackoff(maxDelay time.Duration) backoffStrategy {
 	return defaultBackoffStrategy{maxDelay}
 }
@@ -60,7 +65,8 @@ type defaultJitterStrategy struct {
 	random *rand.Rand
 }
 
-// Creates the default implementation of jitter, which subtracts up to 50% from each delay.
+// Creates the default implementation of jitter, which subtracts a pseudo-random amount from each delay.
+// The ratio parameter should be greater than 0 and less than or equal to 1.0.
 func newDefaultJitter(ratio float64, randSeed int64) jitterStrategy {
 	if randSeed <= 0 {
 		randSeed = time.Now().UnixNano()
@@ -77,17 +83,7 @@ func (s *defaultJitterStrategy) applyJitter(computedDelay time.Duration) time.Du
 	return computedDelay - jitter
 }
 
-//
-// - If backoff is enabled, there is also a configurable maximum delay; the delay will increase
-// exponentially up to the maximum. There is also a configurable "reset interval"; if the system
-// enters a "good" state and then at least that amount of time elapses, the delay is reset back to
-// the base (this avoids perpetually increasing delays in a situation where failures are rare).
-//
-// - If jitter is enabled, each computed delay is reduced pseudo-randomly by up to 50%.
-//
-// This object is meant to be used from a single goroutine once it's been created; its methods are
-// not safe for concurrent use.
-
+// Creates a retryDelayStrategy.
 func newRetryDelayStrategy(
 	baseDelay time.Duration,
 	resetInterval time.Duration,
