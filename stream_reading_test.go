@@ -2,7 +2,6 @@ package eventsource
 
 import (
 	"net/http/httptest"
-	"reflect"
 	"testing"
 	"time"
 
@@ -24,9 +23,7 @@ func TestStreamSubscribeEventsChan(t *testing.T) {
 
 	select {
 	case receivedEvent := <-stream.Events:
-		if !reflect.DeepEqual(receivedEvent, publishedEvent) {
-			t.Errorf("got event %+v, want %+v", receivedEvent, publishedEvent)
-		}
+		assert.Equal(t, publishedEvent, receivedEvent)
 	case <-time.After(timeToWaitForEvent):
 		t.Error("Timed out waiting for event")
 	}
