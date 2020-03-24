@@ -44,6 +44,9 @@ const (
 	//
 	// Stream will not push the error onto the Errors channel; if you have specified a StreamErrorHandler,
 	// the Errors channel is never used.
+	//
+	// This is the default behavior, so if the handler returns an unknown value it will be treated the
+	// same as StreamErrorProceed.
 	StreamErrorProceed StreamErrorHandlerResult = "proceed"
 	// StreamErrorStop is returned by a StreamConnectionErrorFilter if the Stream should handle the error
 	// by immediately stopping and not retrying, as if Close had been called.
