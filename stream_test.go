@@ -79,7 +79,7 @@ func TestStreamCanUseErrorHandlerInsteadOfChannelForErrorOnExistingConnection(t 
 	stream := mustSubscribe(t, httpServer.URL,
 		StreamOptionErrorHandler(func(err error) StreamErrorHandlerResult {
 			myErrChannel <- err
-			return StreamErrorProceed
+			return StreamErrorHandlerResult{}
 		}),
 		StreamOptionInitialRetry(time.Millisecond))
 	defer stream.Close()
@@ -118,7 +118,7 @@ func TestStreamErrorHandlerCanPreventRetryOnExistingConnection(t *testing.T) {
 	stream := mustSubscribe(t, httpServer.URL,
 		StreamOptionErrorHandler(func(err error) StreamErrorHandlerResult {
 			myErrChannel <- err
-			return StreamErrorStop
+			return StreamErrorHandlerResult{CloseNow: true}
 		}),
 		StreamOptionInitialRetry(time.Millisecond))
 	defer stream.Close()
@@ -690,7 +690,7 @@ func testStreamErrorHandlerCanAllowRetryOfInitialConnection(t *testing.T, errorH
 		StreamOptionCanRetryFirstConnection(150*time.Millisecond),
 		StreamOptionErrorHandler(func(err error) StreamErrorHandlerResult {
 			myErrChannel <- err
-			return StreamErrorProceed
+			return StreamErrorHandlerResult{}
 		}))
 	defer func() {
 		if stream != nil {
@@ -720,7 +720,7 @@ func TestStreamErrorHandlerCanPreventRetryOfInitialConnection(t *testing.T) {
 		StreamOptionInitialRetry(100*time.Millisecond),
 		StreamOptionCanRetryFirstConnection(150*time.Millisecond),
 		StreamOptionErrorHandler(func(err error) StreamErrorHandlerResult {
-			return StreamErrorStop
+			return StreamErrorHandlerResult{CloseNow: true}
 		}))
 	defer func() {
 		if stream != nil {

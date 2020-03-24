@@ -31,30 +31,16 @@ type Logger interface {
 	Printf(string, ...interface{})
 }
 
-// StreamErrorHandlerResult is a constant type for use with StreamErrorHandler.
-type StreamErrorHandlerResult string
-
-const (
-	// StreamErrorProceed is returned by a StreamOptionErrorHandler if the Stream should handle the error
-	// normally.
+// StreamErrorHandlerResult contains values returned by StreamErrorHandler.
+type StreamErrorHandlerResult struct {
+	// CloseNow can be set to true to tell the Stream to immediately stop and not retry, as if Close had
+	// been called.
 	//
-	// If the error represents the failure of an existing connection, Stream will retry the connection. If
-	// the error happened during initialization of the Stream, then whether Stream will retry or not is
-	// configurable; see StreamOptionCanRetryFirstConnection.
-	//
-	// Stream will not push the error onto the Errors channel; if you have specified a StreamErrorHandler,
-	// the Errors channel is never used.
-	//
-	// This is the default behavior, so if the handler returns an unknown value it will be treated the
-	// same as StreamErrorProceed.
-	StreamErrorProceed StreamErrorHandlerResult = "proceed"
-	// StreamErrorStop is returned by a StreamConnectionErrorFilter if the Stream should handle the error
-	// by immediately stopping and not retrying, as if Close had been called.
-	//
-	// If the error occurred during initialization of the Stream, rather than on an existing connection,
-	// this will also result in the Subscribe function immediately returning the error.
-	StreamErrorStop StreamErrorHandlerResult = "stop"
-)
+	// If StopNow is false, the Stream will proceed as usual after an error: if there is an existing
+	// connection it will retry the connection, and if the Stream is still being initialized then the
+	// retry behavior is configurable (see StreamOptionCanRetryFirstConnection).
+	CloseNow bool
+}
 
 // StreamErrorHandler is a function type used with StreamOptionErrorHandler.
 //
@@ -67,4 +53,15 @@ const (
 // For errors during initialization of the Stream, this function will be called on the same goroutine that
 // called the Subscribe method; for errors on an existing connection, it will be called on a worker
 // goroutine. It should return promptly and not block the goroutine.
+//
+// In this example, the error handler always logs the error with log.Printf, and it forces the stream to
+// close permanently if there was an HTTP 401 error:
+//
+//     func handleError(err error) eventsource.StreamErrorHandlerResult {
+//         log.Printf("stream error: %s", err)
+//         if se, ok := err.(eventsource.SubscriptionError); ok && se.Code == 401 {
+//             return eventsource.StreamErrorHandlerResult{CloseNow: true}
+//         }
+//         return eventsource.StreamErrorHandlerResult{}
+//     }
 type StreamErrorHandler func(error) StreamErrorHandlerResult

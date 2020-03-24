@@ -133,8 +133,8 @@ func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOpti
 			return nil, err
 		}
 		if configuredOptions.errorHandler != nil {
-			action := configuredOptions.errorHandler(err)
-			if action == StreamErrorStop {
+			result := configuredOptions.errorHandler(err)
+			if result.CloseNow {
 				return nil, err
 			}
 		}
@@ -255,8 +255,8 @@ func (stream *Stream) stream(r io.ReadCloser) {
 
 	reportErrorAndMaybeContinue := func(err error) bool {
 		if stream.errorHandler != nil {
-			action := stream.errorHandler(err)
-			if action == StreamErrorStop {
+			result := stream.errorHandler(err)
+			if result.CloseNow {
 				stream.Close()
 				return false
 			}
