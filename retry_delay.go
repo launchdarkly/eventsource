@@ -138,6 +138,6 @@ func (r *retryDelayStrategy) SetBaseDelay(baseDelay time.Duration) {
 	r.retryCount = 0
 }
 
-func (r *retryDelayStrategy) hasJitter() bool { // used only in tests
+func (r *retryDelayStrategy) hasJitter() bool { //nolint:megacheck // used only in tests
 	return r.jitter != nil
 }

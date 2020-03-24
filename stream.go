@@ -110,13 +110,19 @@ func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOpti
 	if configuredOptions.jitterRatio > 0 {
 		jitter = newDefaultJitter(configuredOptions.jitterRatio, 0)
 	}
+	retryDelay := newRetryDelayStrategy(
+		configuredOptions.initialRetry,
+		configuredOptions.retryResetInterval,
+		backoff,
+		jitter,
+	)
 
 	stream := &Stream{
 		c:           configuredOptions.httpClient,
 		lastEventID: configuredOptions.lastEventID,
 		readTimeout: configuredOptions.readTimeout,
 		req:         request,
-		retryDelay:  newRetryDelayStrategy(configuredOptions.initialRetry, configuredOptions.retryResetInterval, backoff, jitter),
+		retryDelay:  retryDelay,
 		Events:      make(chan Event),
 		Errors:      make(chan error),
 		Logger:      configuredOptions.logger,
@@ -154,7 +160,7 @@ func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOpti
 			}
 			return nil, lastError
 		case <-nextRetryCh:
-			break
+			continue
 		}
 	}
 }

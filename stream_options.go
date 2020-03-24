@@ -6,16 +6,15 @@ import (
 )
 
 type streamOptions struct {
-	initialRetry            time.Duration
-	httpClient              *http.Client
-	lastEventID             string
-	logger                  Logger
-	backoffMaxDelay         time.Duration
-	jitterRatio             float64
-	canRetryFirstConnection bool
-	readTimeout             time.Duration
-	retryResetInterval      time.Duration
-	initialRetryTimeout     time.Duration
+	initialRetry        time.Duration
+	httpClient          *http.Client
+	lastEventID         string
+	logger              Logger
+	backoffMaxDelay     time.Duration
+	jitterRatio         float64
+	readTimeout         time.Duration
+	retryResetInterval  time.Duration
+	initialRetryTimeout time.Duration
 }
 
 // StreamOption is a common interface for optional configuration parameters that can be
