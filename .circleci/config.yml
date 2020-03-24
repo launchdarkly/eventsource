@@ -20,7 +20,7 @@ jobs:
           trap "go-junit-report < output.txt > $CIRCLE_TEST_REPORTS/junit.xml" EXIT
           make test | tee output.txt
 
-      - run: make init && make lint
+      - run: make lint
       
       - store_test_results:
           path: /tmp/circle-reports
