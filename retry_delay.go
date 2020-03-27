@@ -1,7 +1,6 @@
 package eventsource
 
 import (
-	"math"
 	"math/rand"
 	"time"
 )
@@ -53,9 +52,14 @@ func newDefaultBackoff(maxDelay time.Duration) backoffStrategy {
 }
 
 func (s defaultBackoffStrategy) applyBackoff(baseDelay time.Duration, retryCount int) time.Duration {
-	d := time.Duration(int64(baseDelay) * int64(math.Pow(2, float64(retryCount))))
-	if d > s.maxDelay {
-		return s.maxDelay
+	// We use repeated multiplication here rather than math.Pow to avoid overflow if retryCount is high. The
+	// overhead of this should be minimal since we're unlikely to iterate many times before hitting the maximum.
+	d := baseDelay
+	for i := 0; i < retryCount; i++ {
+		d *= 2
+		if d > s.maxDelay {
+			return s.maxDelay
+		}
 	}
 	return d
 }
