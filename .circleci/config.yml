@@ -76,7 +76,7 @@ jobs:
                 command: |
                   mkdir -p $CIRCLE_TEST_REPORTS
                   go-junit-report < output.txt > $CIRCLE_TEST_REPORTS/junit.xml
-                when: alwyas
+                when: always
             - store_test_results:
                 path: /tmp/circle-reports
       
@@ -91,6 +91,3 @@ jobs:
           condition: <<parameters.run-lint>>
           steps:
             - run: make lint
-      
-      - store_test_results:
-          path: /tmp/circle-reports
