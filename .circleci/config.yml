@@ -47,7 +47,10 @@ jobs:
       old-version:
         type: boolean
         default: false
-
+      work-dir:
+        type: string
+        default: ~/project
+  
     docker:
       - image: <<parameters.docker-image>>
         environment:
