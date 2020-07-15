@@ -32,8 +32,8 @@ func TestNewServerHandlerRespondsAfterClose(t *testing.T) {
 		if resp.StatusCode != 200 {
 			t.Errorf("Received StatusCode %d, want 200", resp.StatusCode)
 		}
-	case <-time.After(400 * time.Millisecond):
-		break
+	case <-time.After(250 * time.Millisecond):
+		t.Errorf("Did not receive response in time")
 	}
 }
 
