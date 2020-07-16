@@ -91,7 +91,9 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 
 		var maxConnTimeCh <-chan time.Time
 		if srv.MaxConnTime > 0 {
-			maxConnTimeCh = time.After(srv.MaxConnTime)
+			t := time.NewTimer(srv.MaxConnTime)
+			defer t.Stop()
+			maxConnTimeCh = t.C
 		}
 
 		sub := &subscription{
@@ -110,7 +112,7 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 			case <-notifier.CloseNotify():
 				srv.unregister <- sub
 				return
-			case <-maxConnTimeCh: // if MaxConnTime was not set, this is a nil channel so "<-"" is a no-op
+			case <-maxConnTimeCh: // if MaxConnTime was not set, this is a nil channel and has no effect on the select
 				srv.unregister <- sub // we treat this the same as if the client closed the connection
 				return
 			case ev, ok := <-sub.out:
