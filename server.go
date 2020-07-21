@@ -11,6 +11,7 @@ type subscription struct {
 	channel     string
 	lastEventID string
 	out         chan interface{}
+	closeOnce   sync.Once
 }
 
 type eventOrComment interface{}
@@ -18,11 +19,17 @@ type eventOrComment interface{}
 type outbound struct {
 	channels       []string
 	eventOrComment eventOrComment
+	ackCh          chan<- struct{}
 }
 
 type registration struct {
 	channel    string
 	repository Repository
+}
+
+type unregistration struct {
+	channel         string
+	forceDisconnect bool
 }
 
 type comment struct {
@@ -32,30 +39,32 @@ type comment struct {
 // Server manages any number of event-publishing channels and allows subscribers to consume them.
 // To use it within an HTTP server, create a handler for each channel with Handler().
 type Server struct {
-	AllowCORS     bool          // Enable all handlers to be accessible from any origin
-	ReplayAll     bool          // Replay repository even if there's no Last-Event-Id specified
-	BufferSize    int           // How many messages do we let the client get behind before disconnecting
-	Gzip          bool          // Enable compression if client can accept it
-	MaxConnTime   time.Duration // If non-zero, HTTP connections will be automatically closed after this time
-	Logger        Logger        // Logger is a logger that, when set, will be used for logging debug messages
-	registrations chan *registration
-	pub           chan *outbound
-	subs          chan *subscription
-	unregister    chan *subscription
-	quit          chan bool
-	isClosed      bool
-	isClosedMutex sync.RWMutex
+	AllowCORS       bool          // Enable all handlers to be accessible from any origin
+	ReplayAll       bool          // Replay repository even if there's no Last-Event-Id specified
+	BufferSize      int           // How many messages do we let the client get behind before disconnecting
+	Gzip            bool          // Enable compression if client can accept it
+	MaxConnTime     time.Duration // If non-zero, HTTP connections will be automatically closed after this time
+	Logger          Logger        // Logger is a logger that, when set, will be used for logging debug messages
+	registrations   chan *registration
+	unregistrations chan *unregistration
+	pub             chan *outbound
+	subs            chan *subscription
+	unsubs          chan *subscription
+	quit            chan bool
+	isClosed        bool
+	isClosedMutex   sync.RWMutex
 }
 
 // NewServer creates a new Server instance.
 func NewServer() *Server {
 	srv := &Server{
-		registrations: make(chan *registration),
-		pub:           make(chan *outbound),
-		subs:          make(chan *subscription),
-		unregister:    make(chan *subscription, 2),
-		quit:          make(chan bool),
-		BufferSize:    128,
+		registrations:   make(chan *registration),
+		unregistrations: make(chan *unregistration),
+		pub:             make(chan *outbound),
+		subs:            make(chan *subscription),
+		unsubs:          make(chan *subscription, 2),
+		quit:            make(chan bool),
+		BufferSize:      128,
 	}
 	go srv.run()
 	return srv
@@ -68,6 +77,10 @@ func (srv *Server) Close() {
 }
 
 // Handler creates a new HTTP handler for serving a specified channel.
+//
+// The channel does not have to have been previously registered with Register, but if it has been, the
+// handler may replay events from the registered Repository depending on the setting of server.ReplayAll
+// and the Last-Event-Id header of the request.
 func (srv *Server) Handler(channel string) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		h := w.Header()
@@ -110,17 +123,17 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 		for {
 			select {
 			case <-notifier.CloseNotify():
-				srv.unregister <- sub
+				srv.unsubs <- sub
 				return
 			case <-maxConnTimeCh: // if MaxConnTime was not set, this is a nil channel and has no effect on the select
-				srv.unregister <- sub // we treat this the same as if the client closed the connection
+				srv.unsubs <- sub // we treat this the same as if the client closed the connection
 				return
 			case ev, ok := <-sub.out:
 				if !ok {
 					return
 				}
 				if err := enc.Encode(ev); err != nil {
-					srv.unregister <- sub
+					srv.unsubs <- sub
 					if srv.Logger != nil {
 						srv.Logger.Println(err)
 					}
@@ -132,11 +145,29 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 	}
 }
 
-// Register registers the repository to be used for the specified channel.
+// Register registers a Repository to be used for the specified channel. The Repository will be used to
+// determine whether new subscribers should receive data that was generated before they subscribed.
+//
+// Channels do not have to be registered unless you want to specify a Repository. An unregistered channel can
+// still be subscribed to with Handler, and published to with Publish.
 func (srv *Server) Register(channel string, repo Repository) {
 	srv.registrations <- &registration{
 		channel:    channel,
 		repository: repo,
+	}
+}
+
+// Unregister removes a channel registration that was created by Register. If forceDisconnect is true, it also
+// causes all currently active handlers for that channel to close their connections. If forceDisconnect is false,
+// those connections will remain open until closed by their clients but will not receive any more events.
+//
+// This will not prevent creating new channel subscriptions for the same channel with Handler, or publishing
+// events to that channel with Publish. It is the caller's responsibility to avoid using channels that are no
+// longer supposed to be used.
+func (srv *Server) Unregister(channel string, forceDisconnect bool) {
+	srv.unregistrations <- &unregistration{
+		channel:         channel,
+		forceDisconnect: forceDisconnect,
 	}
 }
 
@@ -146,6 +177,24 @@ func (srv *Server) Publish(channels []string, ev Event) {
 		channels:       channels,
 		eventOrComment: ev,
 	}
+}
+
+// PublishWithAcknowledgment publishes an event to one or more channels, returning a channel that will receive
+// a value after the event has been processed by the server.
+//
+// This can be used to ensure a well-defined ordering of operations. Since each Server method is handled
+// asynchronously via a separate channel, if you call server.Publish and then immediately call server.Close,
+// there is no guarantee that the server execute the Close operation only after the event has been published.
+// If you instead call PublishWithAcknowledgement, and then read from the returned channel before calling
+// Close, you can be sure that the event was published before the server was closed.
+func (srv *Server) PublishWithAcknowledgment(channels []string, ev Event) <-chan struct{} {
+	ackCh := make(chan struct{}, 1)
+	srv.pub <- &outbound{
+		channels:       channels,
+		eventOrComment: ev,
+		ackCh:          ackCh,
+	}
+	return ackCh
 }
 
 // PublishComment publishes a comment to one or more channels.
@@ -169,7 +218,16 @@ func (srv *Server) run() {
 		select {
 		case reg := <-srv.registrations:
 			repos[reg.channel] = reg.repository
-		case sub := <-srv.unregister:
+		case unreg := <-srv.unregistrations:
+			delete(repos, unreg.channel)
+			previousSubs := subs[unreg.channel]
+			delete(subs, unreg.channel)
+			if unreg.forceDisconnect {
+				for s := range previousSubs {
+					s.Close()
+				}
+			}
+		case sub := <-srv.unsubs:
 			delete(subs[sub.channel], sub)
 		case pub := <-srv.pub:
 			for _, c := range pub.channels {
@@ -177,9 +235,17 @@ func (srv *Server) run() {
 					select {
 					case s.out <- pub.eventOrComment:
 					default:
-						srv.unregister <- s
+						srv.unsubs <- s
 						close(s.out)
 					}
+				}
+			}
+			if pub.ackCh != nil {
+				select {
+				// It shouldn't be possible for this channel to block since it is created for a single use, but
+				// we'll do a non-blocking push just to be safe
+				case pub.ackCh <- struct{}{}:
+				default:
 				}
 			}
 		case sub := <-srv.subs:
@@ -214,4 +280,10 @@ func (srv *Server) markServerClosed() {
 	srv.isClosedMutex.Lock()
 	defer srv.isClosedMutex.Unlock()
 	srv.isClosed = true
+}
+
+func (s *subscription) Close() {
+	s.closeOnce.Do(func() {
+		close(s.out)
+	})
 }
