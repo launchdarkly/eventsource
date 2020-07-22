@@ -11,7 +11,6 @@ type subscription struct {
 	channel     string
 	lastEventID string
 	out         chan<- eventOrComment
-	lock        sync.RWMutex
 }
 
 type eventOrComment interface{}
@@ -236,6 +235,7 @@ func (srv *Server) PublishComment(channels []string, text string) {
 }
 
 func (srv *Server) run() {
+	// All access to the subs and repos maps is done from the same goroutine, so modifications are safe.
 	subs := make(map[string]map[*subscription]struct{})
 	repos := make(map[string]Repository)
 	trySend := func(sub *subscription, ec eventOrComment) {
@@ -313,12 +313,12 @@ func (srv *Server) markServerClosed() {
 // Attempts to send an event or comment to the subscription's channel.
 //
 // We do not want to block the main Server goroutine, so this is a non-blocking send. If it fails,
-// we return false to tell the Server that the subscriber has fallen behind and should be closed
-// (we don't close it ourselves here, so we can use just a reader lock). If the send succeeds-- or
-// if we don't need to attempt a send, because the channel was already closed-- we return true.
+// we return false to tell the Server that the subscriber has fallen behind and should be removed;
+// we also immediately close the channel in that case. If the send succeeds-- or if we didn't need
+// to attempt a send, because the channel was already closed-- we return true.
+//
+// This should be called only from the Server.run() goroutine.
 func (s *subscription) send(e eventOrComment) bool {
-	s.lock.RLock()
-	defer s.lock.RUnlock()
 	if s.out == nil {
 		return true
 	}
@@ -326,17 +326,15 @@ func (s *subscription) send(e eventOrComment) bool {
 	case s.out <- e:
 		return true
 	default:
+		s.close()
 		return false
 	}
 }
 
+// Closes a subscription's channel and sets it to nil.
+//
+// This should be called only from the Server.run() goroutine.
 func (s *subscription) close() {
-	s.lock.Lock()
-	ch := s.out
+	close(s.out)
 	s.out = nil
-	s.lock.Unlock()
-
-	if ch != nil {
-		close(ch)
-	}
 }
