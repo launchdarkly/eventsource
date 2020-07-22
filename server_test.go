@@ -79,6 +79,34 @@ func TestServerHandlerReceivesPublishedEvents(t *testing.T) {
 	assert.Equal(t, expected, string(body2))
 }
 
+func TestServerHandlerReceivesPublishedComments(t *testing.T) {
+	channel := "test"
+	server := NewServer()
+	httpServer := httptest.NewServer(server.Handler(channel))
+	defer httpServer.Close()
+
+	resp1, err := http.Get(httpServer.URL)
+	require.NoError(t, err)
+	defer resp1.Body.Close()
+	resp2, err := http.Get(httpServer.URL)
+	require.NoError(t, err)
+	defer resp2.Body.Close()
+
+	server.PublishComment([]string{channel}, "my comment")
+	event := &publication{data: "my-event"}
+	ackCh := server.PublishWithAcknowledgment([]string{channel}, event)
+	<-ackCh
+	server.Close()
+
+	expected := ":my comment\ndata: my-event\n\n"
+	body1, err := ioutil.ReadAll(resp1.Body)
+	require.NoError(t, err)
+	body2, err := ioutil.ReadAll(resp2.Body)
+	require.NoError(t, err)
+	assert.Equal(t, expected, string(body1))
+	assert.Equal(t, expected, string(body2))
+}
+
 func TestServerHandlerCanReceiveEventsFromRepository(t *testing.T) {
 	channel := "test"
 	repo := &testServerRepository{}
