@@ -22,6 +22,7 @@ func (r *testServerRepository) Replay(channel, id string) chan Event {
 		fakeID = "replayed-from-" + id
 	}
 	out <- &publication{id: fakeID, data: "example"}
+	close(out)
 	return out
 }
 

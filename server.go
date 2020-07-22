@@ -10,8 +10,8 @@ import (
 type subscription struct {
 	channel     string
 	lastEventID string
-	out         chan interface{}
-	closeOnce   sync.Once
+	out         chan<- eventOrComment
+	lock        sync.RWMutex
 }
 
 type eventOrComment interface{}
@@ -34,6 +34,10 @@ type unregistration struct {
 
 type comment struct {
 	value string
+}
+
+type eventBatch struct {
+	events <-chan Event
 }
 
 // Server manages any number of event-publishing channels and allows subscribers to consume them.
@@ -109,10 +113,11 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 			maxConnTimeCh = t.C
 		}
 
+		eventCh := make(chan eventOrComment, srv.BufferSize)
 		sub := &subscription{
 			channel:     channel,
 			lastEventID: req.Header.Get("Last-Event-ID"),
-			out:         make(chan interface{}, srv.BufferSize),
+			out:         eventCh,
 		}
 		srv.subs <- sub
 		flusher := w.(http.Flusher)
@@ -120,27 +125,52 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 		notifier := w.(http.CloseNotifier)
 		flusher.Flush()
 		enc := NewEncoder(w, useGzip)
+
+		writeEventOrComment := func(ec eventOrComment) bool {
+			if err := enc.Encode(ec); err != nil {
+				srv.unsubs <- sub
+				if srv.Logger != nil {
+					srv.Logger.Println(err)
+				}
+				return false // if this happens, we'll end the handler early because something's clearly broken
+			}
+			flusher.Flush()
+			return true
+		}
+
+		var readMainCh <-chan eventOrComment = eventCh
+		var readBatchCh <-chan Event
+		closedNormally := false
+
+	ReadLoop:
 		for {
 			select {
 			case <-notifier.CloseNotify():
-				srv.unsubs <- sub
-				return
+				break ReadLoop
 			case <-maxConnTimeCh: // if MaxConnTime was not set, this is a nil channel and has no effect on the select
-				srv.unsubs <- sub // we treat this the same as if the client closed the connection
-				return
-			case ev, ok := <-sub.out:
+				break ReadLoop
+			case ev, ok := <-readMainCh:
 				if !ok {
-					return
+					closedNormally = true
+					break ReadLoop
 				}
-				if err := enc.Encode(ev); err != nil {
-					srv.unsubs <- sub
-					if srv.Logger != nil {
-						srv.Logger.Println(err)
-					}
-					return
+				if batch, ok := ev.(eventBatch); ok {
+					readBatchCh = batch.events
+					readMainCh = nil
+				} else if !writeEventOrComment(ev) {
+					break ReadLoop
 				}
-				flusher.Flush()
+			case ev, ok := <-readBatchCh:
+				if !ok { // end of batch
+					readBatchCh = nil
+					readMainCh = eventCh
+				} else if !writeEventOrComment(ev) {
+					break ReadLoop
+				}
 			}
+		}
+		if !closedNormally {
+			srv.unsubs <- sub // the server didn't tell us to close, so we must tell it that we're closing
 		}
 	}
 }
@@ -205,15 +235,15 @@ func (srv *Server) PublishComment(channels []string, text string) {
 	}
 }
 
-func replay(repo Repository, sub *subscription) {
-	for ev := range repo.Replay(sub.channel, sub.lastEventID) {
-		sub.out <- ev
-	}
-}
-
 func (srv *Server) run() {
 	subs := make(map[string]map[*subscription]struct{})
 	repos := make(map[string]Repository)
+	trySend := func(sub *subscription, ec eventOrComment) {
+		if !sub.send(ec) {
+			sub.close()
+			delete(subs[sub.channel], sub)
+		}
+	}
 	for {
 		select {
 		case reg := <-srv.registrations:
@@ -224,7 +254,7 @@ func (srv *Server) run() {
 			delete(subs, unreg.channel)
 			if unreg.forceDisconnect {
 				for s := range previousSubs {
-					s.Close()
+					s.close()
 				}
 			}
 		case sub := <-srv.unsubs:
@@ -232,12 +262,7 @@ func (srv *Server) run() {
 		case pub := <-srv.pub:
 			for _, c := range pub.channels {
 				for s := range subs[c] {
-					select {
-					case s.out <- pub.eventOrComment:
-					default:
-						srv.unsubs <- s
-						close(s.out)
-					}
+					trySend(s, pub.eventOrComment)
 				}
 			}
 			if pub.ackCh != nil {
@@ -256,13 +281,16 @@ func (srv *Server) run() {
 			if srv.ReplayAll || len(sub.lastEventID) > 0 {
 				repo, ok := repos[sub.channel]
 				if ok {
-					go replay(repo, sub)
+					batchCh := repo.Replay(sub.channel, sub.lastEventID)
+					if batchCh != nil {
+						trySend(sub, eventBatch{events: batchCh})
+					}
 				}
 			}
 		case <-srv.quit:
 			for _, sub := range subs {
 				for s := range sub {
-					close(s.out)
+					s.close()
 				}
 			}
 			return
@@ -282,8 +310,33 @@ func (srv *Server) markServerClosed() {
 	srv.isClosed = true
 }
 
-func (s *subscription) Close() {
-	s.closeOnce.Do(func() {
-		close(s.out)
-	})
+// Attempts to send an event or comment to the subscription's channel.
+//
+// We do not want to block the main Server goroutine, so this is a non-blocking send. If it fails,
+// we return false to tell the Server that the subscriber has fallen behind and should be closed
+// (we don't close it ourselves here, so we can use just a reader lock). If the send succeeds-- or
+// if we don't need to attempt a send, because the channel was already closed-- we return true.
+func (s *subscription) send(e eventOrComment) bool {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+	if s.out == nil {
+		return true
+	}
+	select {
+	case s.out <- e:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *subscription) close() {
+	s.lock.Lock()
+	ch := s.out
+	s.out = nil
+	s.lock.Unlock()
+
+	if ch != nil {
+		close(ch)
+	}
 }
