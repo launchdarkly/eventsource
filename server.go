@@ -135,6 +135,23 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 			return true
 		}
 
+		// The logic below works as follows:
+		// - Normally, the handler is reading from eventCh. Server.run() accesses this channel through sub.out
+		//   and sends published events to it.
+		// - However, if a Repository is being used, the Server might get a whole batch of events that the
+		//   Repository provides through its Replay method. The Repository provides these in the form of a
+		//   channel that it writes to. Since we don't know how many events there will be or how long it will
+		//   take to write them, we do not want to block Server.run() for this.
+		// - Previous implementations of sending events from Replay used a separate goroutine. That was unsafe,
+		//   due to a race condition where Server.run() might close the channel while the Replay goroutine is
+		//   still writing to it.
+		// - So, instead, Server.run() now takes the channel from Replay and wraps it in an eventBatch. When
+		//   the handler sees an eventBatch, it switches over to reading events from that channel until the
+		//   channel is closed. Then it switches back to reading events from the regular channel.
+		// - The Server can close eventCh at any time to indicate that the stream is done. The handler exits.
+		// - If the client closes the connection, or if MaxConnTime elapses, the handler exits after telling
+		//   the Server to stop publishing events to it.
+
 		var readMainCh <-chan eventOrComment = eventCh
 		var readBatchCh <-chan Event
 		closedNormally := false
