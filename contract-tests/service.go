@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -66,6 +69,10 @@ func postCreateStream(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	log := log.New(os.Stdout, fmt.Sprintf("[%s]: ", opts.Tag),
+		log.Ldate|log.Ltime|log.Lmicroseconds|log.Lmsgprefix)
+	log.Printf("Starting stream to %s", opts.URL)
+
 	method := "GET"
 	if opts.Method != "" {
 		method = opts.Method
@@ -94,6 +101,7 @@ func postCreateStream(w http.ResponseWriter, req *http.Request) {
 	es, err := eventsource.SubscribeWithRequestAndOptions(streamReq, streamOpts...)
 
 	if err != nil {
+		log.Printf("Failed to start stream: %s", err)
 		writeError(w, err)
 		return
 	}
@@ -111,6 +119,7 @@ func postCreateStream(w http.ResponseWriter, req *http.Request) {
 	for {
 		select {
 		case <-closeNotifyCh:
+			log.Println("Test ended")
 			es.Close()
 			return
 
@@ -120,9 +129,11 @@ func postCreateStream(w http.ResponseWriter, req *http.Request) {
 				"data": ev.Data(),
 				"id":   ev.Id(),
 			}
+			log.Printf("Received event from stream (%s)", ev.Event())
 			sendMessage(w, jsonObject{"kind": "event", "event": evProps})
 
 		case err := <-es.Errors:
+			log.Printf("Received error from stream: %s", err.Error())
 			sendMessage(w, jsonObject{"kind": "error", "error": err.Error()})
 		}
 	}
