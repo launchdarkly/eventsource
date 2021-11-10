@@ -61,8 +61,6 @@ jobs:
     steps:
       - checkout
 
-      - setup_remote_docker  # necessary due to how we use Docker when running contract tests
-
       - run:
           name: install go-junit-report
           command: go get -u github.com/jstemmer/go-junit-report
