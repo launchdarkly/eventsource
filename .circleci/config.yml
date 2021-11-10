@@ -61,6 +61,8 @@ jobs:
     steps:
       - checkout
 
+      - setup_remote_docker  # necessary due to how we use Docker when running contract tests
+
       - run:
           name: install go-junit-report
           command: go get -u github.com/jstemmer/go-junit-report
@@ -91,3 +93,30 @@ jobs:
           condition: <<parameters.run-lint>>
           steps:
             - run: make lint
+
+      - unless:
+          condition: <<parameters.old-version>>
+          steps:
+            - setup_remote_docker  # necessary in order for the 2 containers we're creating to see each other
+            - run:
+                name: build contract test service
+                command: cd contract-tests && go build
+            - run:
+                name: deploy contract test service in Docker
+                command: |
+                  cd contract-tests && docker build --tag testserviceimage .
+            - run:
+                name: run contract test service
+                command: |
+                  docker network create contract-tests-network
+                  docker run -d -p 8000:8000 --network contract-tests-network \
+                    --name testservice testserviceimage >contract-test-service.log
+            - run:
+                name: run contract test harness
+                command: |
+                  docker run -p 8111:8111 --network contract-tests-network --name testharness \
+                    ldcircleci/sse-contract-tests:1 --url http://testservice:8000 --host testharness          
+            - run:
+                name: show contract test service output
+                when: always
+                command: cat contract-test-service.log
