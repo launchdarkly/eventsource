@@ -30,6 +30,6 @@ contract-tests: build
 	@docker run --rm -p 8111:8111 -it --network contract-tests-network --name testharness \
 		ldcircleci/sse-contract-tests:1 --url http://testservice:8000 --host testharness \
 		|| (echo; echo "Output from test service follows:"; docker logs testservice; docker stop testservice; exit 1)
-	@docker stop testservice >/dev/null
+	@docker stop testservice 2>/dev/null
 
 .PHONY: build lint test contract-tests
