@@ -56,28 +56,5 @@ jobs:
             - run: make lint
 
       # Now run the contract tests
-      - setup_remote_docker  # necessary in order for the 2 containers we're creating to see each other
-      - run:
-          name: build contract test service
-          command: cd contract-tests && go mod tidy && go build
-          # the "go mod tidy" is because otherwise Go 1.16+ will complain about go.sum being out of
-          # date, due to the addition of go-junit-report above
-      - run:
-          name: deploy contract test service in Docker
-          command: |
-            cd contract-tests && docker build --tag testserviceimage .
-      - run:
-          name: run contract test service
-          command: |
-            docker network create contract-tests-network
-            docker run -d -p 8000:8000 --network contract-tests-network \
-              --name testservice testserviceimage
-      - run:
-          name: run contract test harness
-          command: |
-            docker run -p 8111:8111 --network contract-tests-network --name testharness \
-              ldcircleci/sse-contract-tests:1 --url http://testservice:8000 --host testharness          
-      - run:
-          name: show contract test service output
-          when: always
-          command: docker logs testservice
+      - setup_remote_docker  # necessary due to how we're using containers in the contract tests
+      - run: make contract-tests
