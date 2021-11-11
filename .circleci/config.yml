@@ -108,7 +108,7 @@ jobs:
                 command: |
                   docker network create contract-tests-network
                   docker run -d -p 8000:8000 --network contract-tests-network \
-                    --name testservice testserviceimage >contract-test-service.log
+                    --name testservice testserviceimage
             - run:
                 name: run contract test harness
                 command: |
@@ -117,4 +117,4 @@ jobs:
             - run:
                 name: show contract test service output
                 when: always
-                command: cat contract-test-service.log
+                command: docker logs testservice
