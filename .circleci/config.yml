@@ -56,9 +56,7 @@ jobs:
             - run: make lint
 
       - run: make build-contract-tests
-
       - run:
           command: make start-contract-test-service
           background: true
-
       - run: make run-contract-tests
