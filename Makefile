@@ -21,11 +21,20 @@ lint: $(LINTER_VERSION_FILE)
 
 TEMP_TEST_OUTPUT=/tmp/sse-contract-test-service.log
 
-contract-tests:
+build-contract-tests:
 	@cd contract-tests && go mod tidy && go build
-	@./contract-tests/contract-tests >$(TEMP_TEST_OUTPUT) &
-	@curl -s https://raw.githubusercontent.com/launchdarkly/sse-contract-tests/v0.0.3/downloader/run.sh \
-      | VERSION=v0 PARAMS="-url http://localhost:8000 -stop-service-at-end" sh || \
-      (echo "Tests failed; see $(TEMP_TEST_OUTPUT) for test service log"; exit 1)
 
-.PHONY: build lint test contract-tests
+start-contract-test-service:
+	@./contract-tests/contract-tests >$(TEMP_TEST_OUTPUT) &
+
+start-contract-test-service-bg:
+	@echo "Test service output will be captured in $(TEMP_TEST_OUTPUT)"
+	@./contract-tests/contract-tests >$(TEMP_TEST_OUTPUT) &
+
+run-contract-tests:
+	@curl -s https://raw.githubusercontent.com/launchdarkly/sse-contract-tests/v0.0.3/downloader/run.sh \
+      | VERSION=v0 PARAMS="-url http://localhost:8000 -debug -stop-service-at-end" sh
+
+contract-tests: build-contract-tests start-contract-test-service-bg run-contract-tests
+
+.PHONY: build lint test build-contract-tests start-contract-test-service run-contract-tests contract-tests
