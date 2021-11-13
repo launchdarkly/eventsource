@@ -55,6 +55,17 @@ jobs:
           steps:
             - run: make lint
 
-      # Now run the contract tests
-      - setup_remote_docker  # necessary due to how we're using containers in the contract tests
-      - run: make contract-tests
+      - run:
+          name: build contract test service
+          command: cd contract-tests && go mod tidy && go build
+
+      - run:
+          name: start contract test service
+          command: ./contract-tests/contract-tests
+          background: true
+
+      - run:
+          name: run contract tests
+          command: |
+            curl -s https://raw.githubusercontent.com/launchdarkly/sse-contract-tests/v0.0.3/downloader/run.sh \
+              | VERSION=v0 PARAMS="-url http://localhost:8000 -stop-service-at-end" sh

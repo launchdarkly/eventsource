@@ -19,11 +19,13 @@ $(LINTER_VERSION_FILE):
 lint: $(LINTER_VERSION_FILE)
 	$(LINTER) run ./...
 
-contract-tests: build
-	@echo "Building contract test service..."
-	@cd contract-tests && GOOS=linux go mod tidy && GOOS=linux go build
-	@cd contract-tests && docker build --tag testservice .
-	@docker run ldcircleci/sse-contract-tests:1 --url http://testservice:8000 --output-docker-script 1 \
-		| bash
+TEMP_TEST_OUTPUT=/tmp/sse-contract-test-service.log
+
+contract-tests:
+	@cd contract-tests && go mod tidy && go build
+	@./contract-tests/contract-tests >$(TEMP_TEST_OUTPUT) &
+	@curl -s https://raw.githubusercontent.com/launchdarkly/sse-contract-tests/v0.0.3/downloader/run.sh \
+      | VERSION=v0 PARAMS="-url http://localhost:8000 -stop-service-at-end" sh || \
+      (echo "Tests failed; see $(TEMP_TEST_OUTPUT) for test service log"; exit 1)
 
 .PHONY: build lint test contract-tests

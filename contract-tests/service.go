@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +48,9 @@ func main() {
 			getServiceStatus(w)
 		case "POST":
 			postCreateStream(w, r)
+		case "DELETE":
+			fmt.Println("Test service has told us to exit")
+			os.Exit(0)
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}

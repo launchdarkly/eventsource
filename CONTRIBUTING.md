@@ -35,7 +35,7 @@ To build and run all unit tests:
 make test
 ```
 
-To run the standardized contract tests that are run against all LaunchDarkly SSE client implementations (this requires Docker):
+To run the standardized contract tests that are run against all LaunchDarkly SSE client implementations:
 ```
 make contract-tests
 ```
