@@ -29,7 +29,7 @@ start-contract-test-service:
 
 start-contract-test-service-bg:
 	@echo "Test service output will be captured in $(TEMP_TEST_OUTPUT)"
-	@./contract-tests/contract-tests >$(TEMP_TEST_OUTPUT) &
+	@make start-contract-test-service >$(TEMP_TEST_OUTPUT) 2>&1 &
 
 run-contract-tests:
 	@curl -s https://raw.githubusercontent.com/launchdarkly/sse-contract-tests/v0.0.3/downloader/run.sh \
