@@ -25,7 +25,7 @@ build-contract-tests:
 	@cd contract-tests && go mod tidy && go build
 
 start-contract-test-service:
-	@./contract-tests/contract-tests >$(TEMP_TEST_OUTPUT) &
+	@./contract-tests/contract-tests
 
 start-contract-test-service-bg:
 	@echo "Test service output will be captured in $(TEMP_TEST_OUTPUT)"
