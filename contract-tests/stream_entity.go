@@ -14,10 +14,11 @@ import (
 )
 
 type streamEntity struct {
-	sse    *eventsource.Stream
-	opts   streamOpts
-	logger *log.Logger
-	closer chan struct{}
+	sse             *eventsource.Stream
+	opts            streamOpts
+	callbackCounter int
+	logger          *log.Logger
+	closer          chan struct{}
 }
 
 func newStreamEntity(opts streamOpts) *streamEntity {
@@ -94,7 +95,7 @@ func newStreamEntity(opts streamOpts) *streamEntity {
 }
 
 func (e *streamEntity) doCommand(command string) bool {
-	e.logger.Printf("Received command %q", command)
+	e.logger.Printf("Test service sent command: %s", command)
 	if command == "restart" {
 		e.sse.Restart()
 		return true
@@ -111,16 +112,18 @@ func (e *streamEntity) close() {
 }
 
 func (e *streamEntity) sendMessage(message jsonObject) {
+	e.callbackCounter++
+	url := fmt.Sprintf("%s/%d", e.opts.CallbackURL, e.callbackCounter)
 	data, _ := json.Marshal(message)
-	resp, err := http.DefaultClient.Post(e.opts.CallbackURL, "application/json", bytes.NewBuffer(data))
+	resp, err := http.DefaultClient.Post(url, "application/json", bytes.NewBuffer(data))
 	if err != nil {
-		e.logger.Printf("Error sending callback message: %s", err)
+		e.logger.Printf("Callback to %s failed: %s", url, err)
 		return
 	}
 	if resp.Body != nil {
 		_ = resp.Body.Close()
 	}
 	if resp.StatusCode >= 300 {
-		e.logger.Printf("Callback endpoint returned HTTP %d", resp.StatusCode)
+		e.logger.Printf("Callback to %s returned HTTP %d", url, resp.StatusCode)
 	}
 }
