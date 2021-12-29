@@ -74,10 +74,14 @@ func newStreamEntity(opts streamOpts) *streamEntity {
 				if ev == nil {
 					return
 				}
+				id := ev.Id()
+				if evWithLastID, ok := ev.(eventsource.EventWithLastID); ok {
+					id = evWithLastID.LastEventID()
+				}
 				evProps := jsonObject{
 					"type": ev.Event(),
 					"data": ev.Data(),
-					"id":   ev.Id(),
+					"id":   id,
 				}
 				e.logger.Printf("Received event from stream (%s)", ev.Event())
 				e.sendMessage(jsonObject{"kind": "event", "event": evProps})
