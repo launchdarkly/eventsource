@@ -130,8 +130,10 @@ ReadLoop:
 			case "data":
 				pub.data += value + "\n"
 			case "id":
-				pub.id = value
-				dec.lastEventID = value
+				if !strings.ContainsRune(value, 0) {
+					pub.id = value
+					dec.lastEventID = value
+				}
 			case "retry":
 				pub.retry, _ = strconv.ParseInt(value, 10, 64)
 			}
