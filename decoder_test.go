@@ -25,7 +25,7 @@ func TestDecode(t *testing.T) {
 		},
 		{
 			rawInput:     "id: abc\ndata: def\n\n",
-			wantedEvents: []*publication{{id: "abc", data: "def"}},
+			wantedEvents: []*publication{{id: "abc", lastEventID: "abc", data: "def"}},
 		},
 		{
 			// id field should be ignored if it contains a null
@@ -35,9 +35,9 @@ func TestDecode(t *testing.T) {
 	}
 
 	for _, test := range tests {
+		decoder := NewDecoder(strings.NewReader(test.rawInput))
 		i := 0
 		for {
-			decoder := NewDecoder(strings.NewReader(test.rawInput))
 			event, err := decoder.Decode()
 			if err == io.EOF {
 				break
