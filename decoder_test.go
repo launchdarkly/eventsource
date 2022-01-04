@@ -35,9 +35,9 @@ func TestDecode(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		decoder := NewDecoder(strings.NewReader(test.rawInput))
 		i := 0
 		for {
+			decoder := NewDecoder(strings.NewReader(test.rawInput))
 			event, err := decoder.Decode()
 			if err == io.EOF {
 				break
