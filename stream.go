@@ -256,6 +256,10 @@ func (stream *Stream) connect() (io.ReadCloser, error) {
 		}
 		return nil, err
 	}
+	logger := stream.getLogger()
+	if logger != nil {
+		logger.Printf("Stream connection established")
+	}
 	return resp.Body, nil
 }
 
