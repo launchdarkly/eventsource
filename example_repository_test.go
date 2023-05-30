@@ -1,11 +1,14 @@
 package eventsource_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/launchdarkly/eventsource"
+	"io"
 	"net"
 	"net/http"
+
+	"github.com/launchdarkly/eventsource"
 )
 
 type NewsArticle struct {
@@ -13,14 +16,22 @@ type NewsArticle struct {
 	Title, Content string
 }
 
-func (a *NewsArticle) Id() string    { return a.id }
-func (a *NewsArticle) Event() string { return "News Article" }
-func (a *NewsArticle) Data() string  { b, _ := json.Marshal(a); return string(b) }
+func NewNewsArticle(id, title, content string) *NewsArticle {
+	return &NewsArticle{
+		id:      id,
+		Title:   title,
+		Content: content,
+	}
+}
+
+func (a *NewsArticle) Id() string           { return a.id }
+func (a *NewsArticle) Event() string        { return "News Article" }
+func (a *NewsArticle) GetReader() io.Reader { b, _ := json.Marshal(a); return bytes.NewReader(b) }
 
 var articles = []NewsArticle{
-	{"2", "Governments struggle to control global price of gas", "Hot air...."},
-	{"1", "Tomorrow is another day", "And so is the day after."},
-	{"3", "News for news' sake", "Nothing has happened."},
+	*NewNewsArticle("2", "Governments struggle to control global price of gas", "Hot air...."),
+	*NewNewsArticle("1", "Tomorrow is another day", "And so is the day after."),
+	*NewNewsArticle("3", "News for news' sake", "Nothing has happened."),
 }
 
 func buildRepo(srv *eventsource.Server) {
@@ -50,7 +61,10 @@ func ExampleRepository() {
 	// This will receive events in the order that they come
 	for i := 0; i < 3; i++ {
 		ev := <-stream.Events
-		fmt.Println(ev.Id(), ev.Event(), ev.Data())
+		evData, err := io.ReadAll(ev.GetReader())
+		if err == nil {
+			fmt.Println(ev.Id(), ev.Event(), string(evData))
+		}
 	}
 	stream, err = eventsource.Subscribe("http://127.0.0.1:8080/articles", "1")
 	if err != nil {
@@ -60,7 +74,10 @@ func ExampleRepository() {
 	// This will replay the events in order of id
 	for i := 0; i < 3; i++ {
 		ev := <-stream.Events
-		fmt.Println(ev.Id(), ev.Event(), ev.Data())
+		evData, err := io.ReadAll(ev.GetReader())
+		if err == nil {
+			fmt.Println(ev.Id(), ev.Event(), string(evData))
+		}
 	}
 	// Output:
 	// 2 News Article {"Title":"Governments struggle to control global price of gas","Content":"Hot air...."}

@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,6 +17,12 @@ type encoderTestCase struct {
 	expected string
 }
 
+type streamingSplitterTestCase struct {
+	payload         string
+	bufferSize      int
+	expectedResults []string
+}
+
 type writerWithOnlyWriteMethod struct {
 	buf *bytes.Buffer
 }
@@ -24,15 +31,34 @@ func (w *writerWithOnlyWriteMethod) Write(data []byte) (int, error) {
 	return w.buf.Write(data)
 }
 
+func TestStreamingNewlineSplitter(t *testing.T) {
+	for _, tc := range []streamingSplitterTestCase{
+		{payload: "Hi there", bufferSize: 1_000, expectedResults: []string{"Hi there"}},
+		{payload: "Hi\nI have newlines\n", bufferSize: 1_000, expectedResults: []string{"Hi\n", "I have newlines\n", ""}},
+		{payload: "\n\n\n", bufferSize: 1_000, expectedResults: []string{"\n", "\n", "\n", ""}},
+		{payload: "Double new line, what does it mean?\n\n", bufferSize: 1_000, expectedResults: []string{"Double new line, what does it mean?\n", "\n", ""}},
+	} {
+		scanner := bufio.NewScanner(strings.NewReader(tc.payload))
+		scanner.Split(newStreamingNewlineSplitter(tc.bufferSize).scan)
+
+		results := make([]string, 0)
+		for scanner.Scan() {
+			results = append(results, scanner.Text())
+		}
+
+		assert.Equal(t, tc.expectedResults, results)
+	}
+}
+
 func TestEncoderOmitsOptionalFieldsWithoutValues(t *testing.T) {
 	for _, tc := range []encoderTestCase{
-		{publication{data: "aaa"}, "data: aaa\n\n"},
-		{publication{event: "aaa", data: "bbb"}, "event: aaa\ndata: bbb\n\n"},
-		{publication{id: "aaa", data: "bbb"}, "id: aaa\ndata: bbb\n\n"},
-		{publication{id: "aaa", event: "bbb", data: "ccc"}, "id: aaa\nevent: bbb\ndata: ccc\n\n"},
+		{*newPublicationEvent("", "", "", "aaa"), "data: aaa\n\n"},
+		{*newPublicationEvent("", "aaa", "", "bbb"), "event: aaa\ndata: bbb\n\n"},
+		{*newPublicationEvent("aaa", "", "", "bbb"), "id: aaa\ndata: bbb\n\n"},
+		{*newPublicationEvent("aaa", "bbb", "", "ccc"), "id: aaa\nevent: bbb\ndata: ccc\n\n"},
 
 		// An SSE message must *always* have a data field, even if its value is empty.
-		{publication{data: ""}, "data: \n\n"},
+		{*newPublicationEvent("", "", "", ""), "data: \n\n"},
 	} {
 		t.Run(fmt.Sprintf("%+v", tc.event), func(t *testing.T) {
 			buf := bytes.NewBuffer(nil)
@@ -44,11 +70,11 @@ func TestEncoderOmitsOptionalFieldsWithoutValues(t *testing.T) {
 
 func TestEncoderMultiLineData(t *testing.T) {
 	for _, tc := range []encoderTestCase{
-		{publication{data: "\nfirst"}, "data: \ndata: first\n\n"},
-		{publication{data: "first\nsecond"}, "data: first\ndata: second\n\n"},
-		{publication{data: "first\nsecond\nthird"}, "data: first\ndata: second\ndata: third\n\n"},
-		{publication{data: "ends with newline\n"}, "data: ends with newline\ndata: \n\n"},
-		{publication{data: "first\nends with newline\n"}, "data: first\ndata: ends with newline\ndata: \n\n"},
+		{*newPublicationEvent("", "", "", "\nfirst"), "data: \ndata: first\n\n"},
+		{*newPublicationEvent("", "", "", "first\nsecond"), "data: first\ndata: second\n\n"},
+		{*newPublicationEvent("", "", "", "first\nsecond\nthird"), "data: first\ndata: second\ndata: third\n\n"},
+		{*newPublicationEvent("", "", "", "ends with newline\n"), "data: ends with newline\ndata: \n\n"},
+		{*newPublicationEvent("", "", "", "first\nends with newline\n"), "data: first\ndata: ends with newline\ndata: \n\n"},
 	} {
 		t.Run(fmt.Sprintf("%+v", tc.event), func(t *testing.T) {
 			buf := bytes.NewBuffer(nil)
@@ -68,10 +94,7 @@ func TestEncoderComment(t *testing.T) {
 func TestEncoderGzipCompression(t *testing.T) {
 	uncompressedBuf, compressedBuf, expectedCompressedBuf := bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)
 
-	event := &publication{
-		event: "aaa",
-		data:  "bbb",
-	}
+	event := newPublicationEvent("", "aaa", "", "bbb")
 
 	NewEncoder(uncompressedBuf, false).Encode(event)
 	zipper := gzip.NewWriter(expectedCompressedBuf)
@@ -95,11 +118,7 @@ func TestEncoderCanWriteToWriterWithOrWithoutWriteStringMethod(t *testing.T) {
 			w = &writerWithOnlyWriteMethod{buf: buf}
 		}
 		enc := NewEncoder(w, false)
-		enc.Encode(&publication{
-			id:    "aaa",
-			event: "bbb",
-			data:  "ccc",
-		})
+		enc.Encode(newPublicationEvent("aaa", "bbb", "", "ccc"))
 		if withWriteString {
 			w.(*bufio.Writer).Flush()
 		}

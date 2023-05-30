@@ -13,11 +13,20 @@ type publication struct {
 	retry                        int64
 }
 
+func newPublicationEvent(id, event, lastEventID, data string) *publication {
+	return &publication{
+		id:          id,
+		event:       event,
+		lastEventID: lastEventID,
+		data:        data,
+	}
+}
+
 //nolint:golint,stylecheck // should be ID; retained for backward compatibility
-func (s *publication) Id() string    { return s.id }
-func (s *publication) Event() string { return s.event }
-func (s *publication) Data() string  { return s.data }
-func (s *publication) Retry() int64  { return s.retry }
+func (s *publication) Id() string           { return s.id }
+func (s *publication) Event() string        { return s.event }
+func (s *publication) GetReader() io.Reader { return strings.NewReader(s.data) }
+func (s *publication) Retry() int64         { return s.retry }
 
 // LastEventID is from a separate interface, EventWithLastID
 func (s *publication) LastEventID() string { return s.lastEventID }

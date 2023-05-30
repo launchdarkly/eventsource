@@ -2,8 +2,10 @@ package eventsource_test
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/launchdarkly/eventsource"
@@ -11,9 +13,9 @@ import (
 
 type TimeEvent time.Time
 
-func (t TimeEvent) Id() string    { return fmt.Sprint(time.Time(t).UnixNano()) }
-func (t TimeEvent) Event() string { return "Tick" }
-func (t TimeEvent) Data() string  { return time.Time(t).String() }
+func (t TimeEvent) Id() string           { return fmt.Sprint(time.Time(t).UnixNano()) }
+func (t TimeEvent) Event() string        { return "Tick" }
+func (t TimeEvent) GetReader() io.Reader { return strings.NewReader(time.Time(t).String()) }
 
 const (
 	TICK_COUNT = 5
@@ -47,7 +49,11 @@ func ExampleEvent() {
 	}
 	for i := 0; i < TICK_COUNT; i++ {
 		ev := <-stream.Events
-		fmt.Println(ev.Id(), ev.Event(), ev.Data())
+		evData, err := io.ReadAll(ev.GetReader())
+
+		if err == nil {
+			fmt.Println(ev.Id(), ev.Event(), string(evData))
+		}
 	}
 
 	// Output:

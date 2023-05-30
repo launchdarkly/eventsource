@@ -16,21 +16,21 @@ func TestDecode(t *testing.T) {
 	}{
 		{
 			rawInput:     "event: eventName\ndata: {\"sample\":\"value\"}\n\n",
-			wantedEvents: []*publication{{event: "eventName", data: "{\"sample\":\"value\"}"}},
+			wantedEvents: []*publication{newPublicationEvent("", "eventName", "", "{\"sample\":\"value\"}")},
 		},
 		{
 			// the newlines should not be parsed as empty event
 			rawInput:     "\n\n\nevent: event1\n\n\n\n\nevent: event2\n\n",
-			wantedEvents: []*publication{{event: "event1"}, {event: "event2"}},
+			wantedEvents: []*publication{newPublicationEvent("", "event1", "", ""), newPublicationEvent("", "event2", "", "")},
 		},
 		{
 			rawInput:     "id: abc\ndata: def\n\n",
-			wantedEvents: []*publication{{id: "abc", lastEventID: "abc", data: "def"}},
+			wantedEvents: []*publication{newPublicationEvent("abc", "", "abc", "def")},
 		},
 		{
 			// id field should be ignored if it contains a null
 			rawInput:     "id: a\x00bc\ndata: def\n\n",
-			wantedEvents: []*publication{{data: "def"}},
+			wantedEvents: []*publication{newPublicationEvent("", "", "", "def")},
 		},
 	}
 
@@ -65,7 +65,10 @@ func TestDecoderTracksLastEventID(t *testing.T) {
 		event, err := decoder.Decode()
 		require.NoError(t, err)
 
-		assert.Equal(t, "abc", event.Data())
+		evData, err := io.ReadAll(event.GetReader())
+		require.NoError(t, err)
+
+		assert.Equal(t, "abc", string(evData))
 		assert.Equal(t, "", event.Id())
 		assert.Equal(t, "my-id", requireLastEventID(t, event))
 	})
@@ -77,21 +80,30 @@ func TestDecoderTracksLastEventID(t *testing.T) {
 		event1, err := decoder.Decode()
 		require.NoError(t, err)
 
-		assert.Equal(t, "first", event1.Data())
+		evData1, err := io.ReadAll(event1.GetReader())
+		require.NoError(t, err)
+
+		assert.Equal(t, "first", string(evData1))
 		assert.Equal(t, "abc", event1.Id())
 		assert.Equal(t, "abc", requireLastEventID(t, event1))
 
 		event2, err := decoder.Decode()
 		require.NoError(t, err)
 
-		assert.Equal(t, "second", event2.Data())
+		evData2, err := io.ReadAll(event2.GetReader())
+		require.NoError(t, err)
+
+		assert.Equal(t, "second", string(evData2))
 		assert.Equal(t, "", event2.Id())
 		assert.Equal(t, "abc", requireLastEventID(t, event2))
 
 		event3, err := decoder.Decode()
 		require.NoError(t, err)
 
-		assert.Equal(t, "third", event3.Data())
+		evData3, err := io.ReadAll(event3.GetReader())
+		require.NoError(t, err)
+
+		assert.Equal(t, "third", string(evData3))
 		assert.Equal(t, "def", event3.Id())
 		assert.Equal(t, "def", requireLastEventID(t, event3))
 	})
@@ -103,21 +115,30 @@ func TestDecoderTracksLastEventID(t *testing.T) {
 		event1, err := decoder.Decode()
 		require.NoError(t, err)
 
-		assert.Equal(t, "first", event1.Data())
+		evData1, err := io.ReadAll(event1.GetReader())
+		require.NoError(t, err)
+
+		assert.Equal(t, "first", string(evData1))
 		assert.Equal(t, "abc", event1.Id())
 		assert.Equal(t, "abc", requireLastEventID(t, event1))
 
 		event2, err := decoder.Decode()
 		require.NoError(t, err)
 
-		assert.Equal(t, "second", event2.Data())
+		evData2, err := io.ReadAll(event2.GetReader())
+		require.NoError(t, err)
+
+		assert.Equal(t, "second", string(evData2))
 		assert.Equal(t, "", event2.Id())
 		assert.Equal(t, "abc", requireLastEventID(t, event2))
 
 		event3, err := decoder.Decode()
 		require.NoError(t, err)
 
-		assert.Equal(t, "third", event3.Data())
+		evData3, err := io.ReadAll(event3.GetReader())
+		require.NoError(t, err)
+
+		assert.Equal(t, "third", string(evData3))
 		assert.Equal(t, "def", event3.Id())
 		assert.Equal(t, "def", requireLastEventID(t, event3))
 	})
@@ -129,14 +150,20 @@ func TestDecoderTracksLastEventID(t *testing.T) {
 		event1, err := decoder.Decode()
 		require.NoError(t, err)
 
-		assert.Equal(t, "first", event1.Data())
+		evData1, err := io.ReadAll(event1.GetReader())
+		require.NoError(t, err)
+
+		assert.Equal(t, "first", string(evData1))
 		assert.Equal(t, "abc", event1.Id())
 		assert.Equal(t, "abc", requireLastEventID(t, event1))
 
 		event2, err := decoder.Decode()
 		require.NoError(t, err)
 
-		assert.Equal(t, "second", event2.Data())
+		evData2, err := io.ReadAll(event2.GetReader())
+		require.NoError(t, err)
+
+		assert.Equal(t, "second", string(evData2))
 		assert.Equal(t, "", event2.Id())
 		assert.Equal(t, "", requireLastEventID(t, event2))
 	})

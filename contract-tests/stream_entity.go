@@ -74,9 +74,13 @@ func newStreamEntity(opts streamOpts) *streamEntity {
 				if ev == nil {
 					return
 				}
+				evData, err := io.ReadAll(ev.GetReader())
+				if err != nil {
+					e.logger.Printf("Failed to read event body (%s)", ev.Event())
+				}
 				evProps := jsonObject{
 					"type": ev.Event(),
-					"data": ev.Data(),
+					"data": string(evData),
 					"id":   ev.(eventsource.EventWithLastID).LastEventID(),
 					// Note that the cast above will panic if the event does not implement EventWithLastID. Every
 					// event returned by the eventsource client *does* implement that interface - it is only a

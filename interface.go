@@ -5,6 +5,10 @@
 // If the Repository interface is implemented on the server, events can be replayed in case of a network disconnection.
 package eventsource
 
+import (
+	"io"
+)
+
 // Event is the interface for any event received by the client or sent by the server.
 type Event interface {
 	// Id is an identifier that can be used to allow a client to replay
@@ -13,8 +17,11 @@ type Event interface {
 	Id() string
 	// The name of the event. Return empty string if not required.
 	Event() string
-	// The payload of the event.
-	Data() string
+	// A reader that will return the payload of the event.
+	//
+	// It is expected that this method will return a fresh reader each time,
+	// allowing an event to be read multiple times.
+	GetReader() io.Reader
 }
 
 // EventWithLastID is an additional interface for an event received by the client,

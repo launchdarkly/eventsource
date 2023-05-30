@@ -11,11 +11,7 @@ import (
 )
 
 func toPublication(e httphelpers.SSEEvent) *publication {
-	return &publication{
-		id:    e.ID,
-		event: e.Event,
-		data:  e.Data,
-	}
+	return newPublicationEvent(e.ID, e.Event, "", e.Data)
 }
 
 func TestStreamRestart(t *testing.T) {

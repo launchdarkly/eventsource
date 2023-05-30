@@ -22,7 +22,7 @@ func (r *testServerRepository) Replay(channel, id string) chan Event {
 	} else {
 		fakeID = "replayed-from-" + id
 	}
-	out <- &publication{id: fakeID, data: "example"}
+	out <- newPublicationEvent(fakeID, "", "", "example")
 	close(out)
 	return out
 }
@@ -66,7 +66,7 @@ func TestServerHandlerReceivesPublishedEvents(t *testing.T) {
 	require.NoError(t, err)
 	defer resp2.Body.Close()
 
-	event := &publication{data: "my-event"}
+	event := newPublicationEvent("", "", "", "my-event")
 	ackCh := server.PublishWithAcknowledgment([]string{channel}, event)
 	<-ackCh
 	server.Close()
@@ -94,7 +94,7 @@ func TestServerHandlerReceivesPublishedComments(t *testing.T) {
 	defer resp2.Body.Close()
 
 	server.PublishComment([]string{channel}, "my comment")
-	event := &publication{data: "my-event"}
+	event := newPublicationEvent("", "", "", "my-event")
 	ackCh := server.PublishWithAcknowledgment([]string{channel}, event)
 	<-ackCh
 	server.Close()
@@ -207,12 +207,12 @@ func TestServerCanDisconnectClientsWhenUnregisteringRepository(t *testing.T) {
 	require.NoError(t, err)
 	defer resp2.Body.Close()
 
-	event1 := &publication{data: "my-event1"}
+	event1 := newPublicationEvent("", "", "", "my-event1")
 	ackCh := server.PublishWithAcknowledgment([]string{channel}, event1)
 	<-ackCh
 	server.Unregister(channel, true)
 
-	event2 := &publication{data: "my-event2"}
+	event2 := newPublicationEvent("", "", "", "my-event2")
 	ackCh = server.PublishWithAcknowledgment([]string{channel}, event2)
 	<-ackCh
 
