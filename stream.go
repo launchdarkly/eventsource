@@ -1,11 +1,14 @@
 package eventsource
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
+	"net/http/httptrace"
 	"sync"
 	"time"
 )
@@ -75,6 +78,7 @@ func Subscribe(url, lastEventID string) (*Stream, error) {
 // be configured by providing any number of StreamOption values.
 func SubscribeWithURL(url string, options ...StreamOption) (*Stream, error) {
 	req, err := http.NewRequest("GET", url, nil)
+
 	if err != nil {
 		return nil, err
 	}
@@ -115,6 +119,37 @@ func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOpti
 			return nil, err
 		}
 	}
+
+	trace := &httptrace.ClientTrace{
+		GotFirstResponseByte: func() {
+			log.Println("first-response-byte")
+		},
+		TLSHandshakeStart: func() {
+			log.Println("tls-handshake-start")
+		},
+		TLSHandshakeDone: func(state tls.ConnectionState, err error) {
+			log.Println("tls-handshake-done")
+			log.Println("tls-state:", state)
+			if err != nil {
+				log.Println("tls-error:", err)
+			}
+		},
+		ConnectStart: func(network, addr string) {
+			log.Printf("connect-start:%s:%s\n", network, addr)
+		},
+		ConnectDone: func(network, addr string, err error) {
+			log.Printf("connect-done:%s:%s\n", network, addr)
+		},
+		DNSStart: func(info httptrace.DNSStartInfo) {
+			log.Println("dns-start")
+			log.Println("dns-info:", info)
+		},
+		DNSDone: func(info httptrace.DNSDoneInfo) {
+			log.Printf("dns-done")
+			log.Println("dns-info:", info)
+		},
+	}
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
 
 	stream := newStream(request, configuredOptions)
 
