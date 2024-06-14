@@ -3,9 +3,11 @@ package eventsource
 import (
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"io"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -42,6 +44,7 @@ type Stream struct {
 	closeOnce   sync.Once
 	mu          sync.RWMutex
 	connections int
+	cacheBust   bool
 }
 
 var (
@@ -185,6 +188,7 @@ func newStream(request *http.Request, configuredOptions streamOptions) *Stream {
 		Logger:       configuredOptions.logger,
 		restarter:    make(chan struct{}, 1),
 		closer:       make(chan struct{}),
+		cacheBust:    configuredOptions.cacheBust,
 	}
 
 	if configuredOptions.errorHandler == nil {
@@ -235,6 +239,16 @@ func (stream *Stream) connect() (io.ReadCloser, error) {
 		stream.req.Header.Set("Last-Event-ID", stream.lastEventID)
 	}
 	req := *stream.req
+
+	existingURL, err := url.Parse(req.URL.String())
+	if err != nil {
+		return nil, err
+	}
+	if stream.cacheBust {
+		existingQuery := existingURL.Query()
+		existingQuery.Set("cacheBust", uuid.New().String())
+		req.URL.RawQuery = existingQuery.Encode()
+	}
 
 	// All but the initial connection will need to regenerate the body
 	if stream.connections > 0 && req.GetBody != nil {

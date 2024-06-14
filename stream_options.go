@@ -16,6 +16,7 @@ type streamOptions struct {
 	retryResetInterval  time.Duration
 	initialRetryTimeout time.Duration
 	errorHandler        StreamErrorHandler
+	cacheBust           bool
 }
 
 // StreamOption is a common interface for optional configuration parameters that can be
@@ -144,6 +145,19 @@ type retryResetIntervalOption struct {
 
 func (o retryResetIntervalOption) apply(s *streamOptions) error {
 	s.retryResetInterval = o.retryResetInterval
+	return nil
+}
+
+func StreamOptionCacheBust(cacheBust bool) StreamOption {
+	return cacheBustOption{cacheBust: cacheBust}
+}
+
+type cacheBustOption struct {
+	cacheBust bool
+}
+
+func (c cacheBustOption) apply(s *streamOptions) error {
+	s.cacheBust = c.cacheBust
 	return nil
 }
 
