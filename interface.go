@@ -78,11 +78,11 @@ type StreamErrorHandlerResult struct {
 // In this example, the error handler always logs the error with log.Printf, and it forces the stream to
 // close permanently if there was an HTTP 401 error:
 //
-//     func handleError(err error) eventsource.StreamErrorHandlerResult {
-//         log.Printf("stream error: %s", err)
-//         if se, ok := err.(eventsource.SubscriptionError); ok && se.Code == 401 {
-//             return eventsource.StreamErrorHandlerResult{CloseNow: true}
-//         }
-//         return eventsource.StreamErrorHandlerResult{}
-//     }
+//	func handleError(err error) eventsource.StreamErrorHandlerResult {
+//	    log.Printf("stream error: %s", err)
+//	    if se, ok := err.(eventsource.SubscriptionError); ok && se.Code == 401 {
+//	        return eventsource.StreamErrorHandlerResult{CloseNow: true}
+//	    }
+//	    return eventsource.StreamErrorHandlerResult{}
+//	}
 type StreamErrorHandler func(error) StreamErrorHandlerResult
