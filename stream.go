@@ -312,8 +312,10 @@ NewStream:
 				_ = r.Close()
 				r = nil
 				// allow the decoding goroutine to terminate
+				//nolint:revive // false positive, need to drain the channels here
 				for range errs {
 				}
+				//nolint:revive // false positive, need to drain the channels here
 				for range events {
 				}
 			}
@@ -364,7 +366,7 @@ NewStream:
 	close(stream.Events)
 }
 
-func (stream *Stream) getRetryDelayStrategy() *retryDelayStrategy { // nolint:megacheck // unused except by tests
+func (stream *Stream) getRetryDelayStrategy() *retryDelayStrategy { //nolint:unused // unused except by tests
 	return stream.retryDelay
 }
 
