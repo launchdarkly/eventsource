@@ -49,14 +49,3 @@ jobs:
         with:
           name: Contract-test-service-logs-${{ steps.go-version.outputs.version }}
           path: /tmp/sdk-contract-test-service.log
-
-  benchmarks:
-    name: 'Benchmarks'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup Go ${{ inputs.go-version }}
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ inputs.go-version }}
-      - uses: ./.github/actions/benchmarks
