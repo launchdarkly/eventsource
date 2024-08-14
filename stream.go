@@ -192,10 +192,6 @@ func newStream(request *http.Request, configuredOptions streamOptions) *Stream {
 		stream.Errors = make(chan error)
 	}
 
-	// override checkRedirect to include headers before go1.8
-	// we'd prefer to skip this because it is not thread-safe and breaks golang race condition checking
-	setCheckRedirect(stream.c)
-
 	return stream
 }
 
