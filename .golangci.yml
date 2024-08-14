@@ -5,10 +5,9 @@ run:
 linters:
   enable:
     - bodyclose
-    - deadcode
-    - depguard
     - dupl
     - errcheck
+    - exportloopref
     - goconst
     - gochecknoglobals
     - gochecknoinits
@@ -18,26 +17,23 @@ linters:
     - godox
     - gofmt
     - goimports
-    - golint
     - gosec
     - gosimple
     - govet
     - ineffassign
-    - interfacer
     - lll
     - megacheck
     - misspell
     - nakedret
     - nolintlint
     - prealloc
+    - revive
     - staticcheck
-    - structcheck
     - stylecheck
     - typecheck
     - unconvert
     - unparam
     - unused
-    - varcheck
     - whitespace
   fast: false
 
@@ -45,9 +41,8 @@ linters-settings:
   gofmt:
     simplify: false
   goimports:
-    local-prefixes: gopkg.in/launchdarkly,github.com/launchdarkly
-  
+    local-prefixes: github.com/launchdarkly
+
 issues:
   exclude-use-default: false
   max-same-issues: 1000
-  max-per-linter: 1000
