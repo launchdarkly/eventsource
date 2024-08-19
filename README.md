@@ -7,7 +7,7 @@ Eventsource implements a [Go](http://golang.org/) implementation of client and s
 
 This is a fork of: https://github.com/donovanhide/eventsource
 
-# Supported Go versions
+## Supported Go versions
 
 The library supports the 'latest' and 'penultimate' Go versions defined in [this file](./.github/variables/go-versions.env).
 
