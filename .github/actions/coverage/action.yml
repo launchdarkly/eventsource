@@ -30,12 +30,9 @@ runs:
 
     - name: Enforce coverage
       shell: bash
+      if: steps.test-coverage.outputs.coverage_status != 0
       run: |
-        if [ "${{ steps.test-coverage.outputs.coverage_status }}" != "0" ]; then
-          echo "Code isn't fully covered!"
-          if [ "${{ inputs.enforce }}" == "true" ]; then
-            exit 1
-          fi
-        else 
-          echo "Code is fully covered!"
+        echo "Code isn't fully covered!"
+        if [ "${{ inputs.enforce }}" == "true" ]; then
+          exit 1
         fi
