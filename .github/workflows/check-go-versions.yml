@@ -35,18 +35,11 @@ jobs:
       pull-requests: write
     needs: check-go-eol
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        branch: ["v6", "v7"]
-      fail-fast: false
     env:
       officialLatestVersion: ${{ needs.check-go-eol.outputs.latest }}
       officialPenultimateVersion: ${{ needs.check-go-eol.outputs.penultimate }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ matrix.branch }}
-
       - name: Get current Go versions
         id: go-versions
         run:  cat ./.github/variables/go-versions.env > $GITHUB_OUTPUT
@@ -61,14 +54,6 @@ jobs:
           sed -i "s/Go version ${{ steps.go-versions.outputs.penultimate }}/Go version ${{ env.officialPenultimateVersion }}/g" \
                   README.md
 
-      - name: Update go.mod and testservice/go.mod
-        if: steps.update-go-versions.outcome == 'success'
-        id: update-go-mod
-        run: |
-          go mod edit -go=${{ env.officialPenultimateVersion }}
-          cd testservice
-          go mod edit -go=${{ env.officialPenultimateVersion }}
-
       - name: Create pull request
         if: steps.update-go-mod.outcome == 'success'
         uses: peter-evans/create-pull-request@v6
@@ -77,8 +62,6 @@ jobs:
           add-paths: |
             .github/variables/go-versions.env
             README.md
-            go.mod
-            testservice/go.mod
           branch: "launchdarklyreleasebot/update-to-go${{ env.officialLatestVersion }}-${{ matrix.branch }}"
           author: "LaunchDarklyReleaseBot <LaunchDarklyReleaseBot@launchdarkly.com>"
           committer: "LaunchDarklyReleaseBot <LaunchDarklyReleaseBot@launchdarkly.com>"
