@@ -1,6 +1,6 @@
 module github.com/launchdarkly/eventsource
 
-go 1.13
+go 1.17
 
 require (
 	github.com/launchdarkly/go-test-helpers/v2 v2.2.0

@@ -1,6 +1,6 @@
 module github.com/launchdarkly/eventsource/contract-tests
 
-go 1.13
+go 1.17
 
 replace github.com/launchdarkly/eventsource => ../
 
