@@ -21,6 +21,11 @@ lint: $(LINTER_VERSION_FILE)
 
 TEMP_TEST_OUTPUT=/tmp/sse-contract-test-service.log
 
+bump-min-go-version:
+	go mod edit -go=$(MIN_GO_VERSION) go.mod
+	cd contract-tests && go mod edit -go=$(MIN_GO_VERSION) go.mod
+	cd ./.github/variables && sed -i.bak "s#min=[^ ]*#min=$(MIN_GO_VERSION)#g" go-versions.env && rm go-versions.env.bak
+
 build-contract-tests:
 	@cd contract-tests && go mod tidy && go build
 
@@ -37,4 +42,4 @@ run-contract-tests:
 
 contract-tests: build-contract-tests start-contract-test-service-bg run-contract-tests
 
-.PHONY: build lint test build-contract-tests start-contract-test-service run-contract-tests contract-tests
+.PHONY: build lint test build-contract-tests start-contract-test-service run-contract-tests contract-tests bump-min-go-version

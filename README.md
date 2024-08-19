@@ -7,9 +7,17 @@ Eventsource implements a [Go](http://golang.org/) implementation of client and s
 
 This is a fork of: https://github.com/donovanhide/eventsource
 
-This version of the library supports Go 1.21 and higher.
+# Supported Go versions
 
-The package is a Go module, but can still be imported by projects that do not use modules.
+The library supports the 'latest' and 'penultimate' Go versions defined in [this file](./.github/variables/go-versions.env).
+
+LaunchDarkly intends to keep those versions up-to-date with the Go project's latest two releases, which represents a support
+period of roughly 1 year. This policy is intended to match Go's official [Release Policy](https://go.dev/doc/devel/release):
+each major Go release is supported until there are two newer major releases.
+
+Additionally, a 'minimum' version is tested in CI but not officially supported. This minimum version is found in [go.mod](./go.mod).
+This version may be [bumped](./CONTRIBUTING.md#bumping-the-minimum-go-version) from time to time as new Go features
+become available that are useful to the SDK.
 
 ## Installation
 
