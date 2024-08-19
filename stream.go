@@ -192,10 +192,6 @@ func newStream(request *http.Request, configuredOptions streamOptions) *Stream {
 		stream.Errors = make(chan error)
 	}
 
-	// override checkRedirect to include headers before go1.8
-	// we'd prefer to skip this because it is not thread-safe and breaks golang race condition checking
-	setCheckRedirect(stream.c)
-
 	return stream
 }
 
@@ -316,8 +312,10 @@ NewStream:
 				_ = r.Close()
 				r = nil
 				// allow the decoding goroutine to terminate
+				//nolint:revive // false positive, need to drain the channels here
 				for range errs {
 				}
+				//nolint:revive // false positive, need to drain the channels here
 				for range events {
 				}
 			}
@@ -368,7 +366,7 @@ NewStream:
 	close(stream.Events)
 }
 
-func (stream *Stream) getRetryDelayStrategy() *retryDelayStrategy { // nolint:megacheck // unused except by tests
+func (stream *Stream) getRetryDelayStrategy() *retryDelayStrategy { //nolint:unused // unused except by tests
 	return stream.retryDelay
 }
 

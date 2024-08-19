@@ -73,6 +73,7 @@ func newDefaultJitter(ratio float64, randSeed int64) jitterStrategy {
 	if ratio > 1.0 {
 		ratio = 1.0
 	}
+	//nolint:gosec // This isn't a cryptographic use-case, weak RNG is acceptable
 	return &defaultJitterStrategy{ratio, rand.New(rand.NewSource(randSeed))}
 }
 
@@ -140,6 +141,6 @@ func (r *retryDelayStrategy) SetBaseDelay(baseDelay time.Duration) {
 	r.lock.Unlock()
 }
 
-func (r *retryDelayStrategy) hasJitter() bool { //nolint:megacheck // used only in tests
+func (r *retryDelayStrategy) hasJitter() bool { //nolint:unused // used only in tests
 	return r.jitter != nil
 }
