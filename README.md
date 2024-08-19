@@ -1,5 +1,5 @@
 [![GoDoc](https://godoc.org/github.com/launchdarkly/eventsource?status.svg)](http://godoc.org/github.com/launchdarkly/eventsource)
-[![CircleCI](https://circleci.com/gh/launchdarkly/eventsource.svg?style=svg)](https://circleci.com/gh/launchdarkly/eventsource)
+[![Actions Status](https://github.com/launchdarkly/eventsource/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/launchdarkly/eventsource/actions/workflows/ci.yml)
 
 # Eventsource
 
