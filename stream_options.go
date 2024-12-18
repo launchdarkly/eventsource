@@ -2,6 +2,7 @@ package eventsource
 
 import (
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -16,12 +17,29 @@ type streamOptions struct {
 	retryResetInterval  time.Duration
 	initialRetryTimeout time.Duration
 	errorHandler        StreamErrorHandler
+	queryParamsFunc     *func() url.Values
 }
 
 // StreamOption is a common interface for optional configuration parameters that can be
 // used in creating a stream.
 type StreamOption interface {
 	apply(s *streamOptions) error
+}
+
+type dynamicQueryParamsOption struct {
+	queryParamsFunc func() url.Values
+}
+
+func (o dynamicQueryParamsOption) apply(s *streamOptions) error {
+	s.queryParamsFunc = &o.queryParamsFunc
+	return nil
+}
+
+// StreamOptionDynamicQueryParams returns an option that sets a function to
+// generate query parameters each time the stream needs to make a fresh
+// connection.
+func StreamOptionDynamicQueryParams(f func() url.Values) StreamOption {
+	return dynamicQueryParamsOption{queryParamsFunc: f}
 }
 
 type readTimeoutOption struct {

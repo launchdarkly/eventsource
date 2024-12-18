@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -43,6 +44,29 @@ func TestStreamSendsLastEventID(t *testing.T) {
 
 	r0 := <-requestsCh
 	assert.Equal(t, lastID, r0.Request.Header.Get("Last-Event-ID"))
+}
+
+func TestCanSetStreamQueryParameters(t *testing.T) {
+	streamHandler, streamControl := httphelpers.SSEHandler(nil)
+	defer streamControl.Close()
+	handler, requestsCh := httphelpers.RecordingHandler(streamHandler)
+
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+
+	option := StreamOptionDynamicQueryParams(func() url.Values {
+		return url.Values{
+			"filter": []string{"my-custom-filter"},
+			"basis":  []string{"last-known-basis"},
+		}
+	})
+
+	stream := mustSubscribe(t, httpServer.URL, option)
+	defer stream.Close()
+
+	r0 := <-requestsCh
+	assert.Equal(t, "my-custom-filter", r0.Request.URL.Query().Get("filter"))
+	assert.Equal(t, "last-known-basis", r0.Request.URL.Query().Get("basis"))
 }
 
 func TestStreamReconnectWithRequestBodySendsBodyTwice(t *testing.T) {

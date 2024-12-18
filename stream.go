@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -14,11 +15,12 @@ import (
 // It will try and reconnect if the connection is lost, respecting both
 // received retry delays and event id's.
 type Stream struct {
-	c           *http.Client
-	req         *http.Request
-	lastEventID string
-	readTimeout time.Duration
-	retryDelay  *retryDelayStrategy
+	c               *http.Client
+	req             *http.Request
+	queryParamsFunc *func() url.Values
+	lastEventID     string
+	readTimeout     time.Duration
+	retryDelay      *retryDelayStrategy
 	// Events emits the events received by the stream
 	Events chan Event
 	// Errors emits any errors encountered while reading events from the stream.
@@ -187,6 +189,10 @@ func newStream(request *http.Request, configuredOptions streamOptions) *Stream {
 		closer:       make(chan struct{}),
 	}
 
+	if configuredOptions.queryParamsFunc != nil {
+		stream.queryParamsFunc = configuredOptions.queryParamsFunc
+	}
+
 	if configuredOptions.errorHandler == nil {
 		// The Errors channel is only used if there is no error handler.
 		stream.Errors = make(chan error)
@@ -231,6 +237,9 @@ func (stream *Stream) connect() (io.ReadCloser, error) {
 		stream.req.Header.Set("Last-Event-ID", stream.lastEventID)
 	}
 	req := *stream.req
+	if stream.queryParamsFunc != nil {
+		req.URL.RawQuery = (*stream.queryParamsFunc)().Encode()
+	}
 
 	// All but the initial connection will need to regenerate the body
 	if stream.connections > 0 && req.GetBody != nil {
