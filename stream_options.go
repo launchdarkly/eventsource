@@ -17,7 +17,7 @@ type streamOptions struct {
 	retryResetInterval  time.Duration
 	initialRetryTimeout time.Duration
 	errorHandler        StreamErrorHandler
-	queryParamsFunc     *func() url.Values
+	queryParamsFunc     *func(existing url.Values) url.Values
 }
 
 // StreamOption is a common interface for optional configuration parameters that can be
@@ -27,7 +27,7 @@ type StreamOption interface {
 }
 
 type dynamicQueryParamsOption struct {
-	queryParamsFunc func() url.Values
+	queryParamsFunc func(existing url.Values) url.Values
 }
 
 func (o dynamicQueryParamsOption) apply(s *streamOptions) error {
@@ -38,7 +38,7 @@ func (o dynamicQueryParamsOption) apply(s *streamOptions) error {
 // StreamOptionDynamicQueryParams returns an option that sets a function to
 // generate query parameters each time the stream needs to make a fresh
 // connection.
-func StreamOptionDynamicQueryParams(f func() url.Values) StreamOption {
+func StreamOptionDynamicQueryParams(f func(existing url.Values) url.Values) StreamOption {
 	return dynamicQueryParamsOption{queryParamsFunc: f}
 }
 

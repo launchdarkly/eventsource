@@ -17,7 +17,7 @@ import (
 type Stream struct {
 	c               *http.Client
 	req             *http.Request
-	queryParamsFunc *func() url.Values
+	queryParamsFunc *func(existing url.Values) url.Values
 	lastEventID     string
 	readTimeout     time.Duration
 	retryDelay      *retryDelayStrategy
@@ -238,7 +238,7 @@ func (stream *Stream) connect() (io.ReadCloser, error) {
 	}
 	req := *stream.req
 	if stream.queryParamsFunc != nil {
-		req.URL.RawQuery = (*stream.queryParamsFunc)().Encode()
+		req.URL.RawQuery = (*stream.queryParamsFunc)(req.URL.Query()).Encode()
 	}
 
 	// All but the initial connection will need to regenerate the body

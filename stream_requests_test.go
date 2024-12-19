@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"testing"
 	"time"
 
@@ -46,7 +47,7 @@ func TestStreamSendsLastEventID(t *testing.T) {
 	assert.Equal(t, lastID, r0.Request.Header.Get("Last-Event-ID"))
 }
 
-func TestCanSetStreamQueryParameters(t *testing.T) {
+func TestCanReplaceStreamQueryParameters(t *testing.T) {
 	streamHandler, streamControl := httphelpers.SSEHandler(nil)
 	defer streamControl.Close()
 	handler, requestsCh := httphelpers.RecordingHandler(streamHandler)
@@ -54,7 +55,7 @@ func TestCanSetStreamQueryParameters(t *testing.T) {
 	httpServer := httptest.NewServer(handler)
 	defer httpServer.Close()
 
-	option := StreamOptionDynamicQueryParams(func() url.Values {
+	option := StreamOptionDynamicQueryParams(func(existing url.Values) url.Values {
 		return url.Values{
 			"filter": []string{"my-custom-filter"},
 			"basis":  []string{"last-known-basis"},
@@ -67,6 +68,54 @@ func TestCanSetStreamQueryParameters(t *testing.T) {
 	r0 := <-requestsCh
 	assert.Equal(t, "my-custom-filter", r0.Request.URL.Query().Get("filter"))
 	assert.Equal(t, "last-known-basis", r0.Request.URL.Query().Get("basis"))
+}
+
+func TestCanUpdateStreamQueryParameters(t *testing.T) {
+	streamHandler, streamControl := httphelpers.SSEHandler(nil)
+	defer streamControl.Close()
+	handler, requestsCh := httphelpers.RecordingHandler(streamHandler)
+
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+
+	option := StreamOptionDynamicQueryParams(func(existing url.Values) url.Values {
+		if existing.Has("count") {
+			count, _ := strconv.Atoi(existing.Get("count"))
+
+			if count == 1 {
+				existing.Set("count", strconv.Itoa(count+1))
+				return existing
+			}
+
+			return url.Values{}
+		}
+
+		return url.Values{
+			"initial": []string{"payload is set"},
+			"count":   []string{"1"},
+		}
+	})
+
+	stream := mustSubscribe(t, httpServer.URL, option, StreamOptionInitialRetry(time.Millisecond))
+	defer stream.Close()
+
+	r0 := <-requestsCh
+	assert.Equal(t, "payload is set", r0.Request.URL.Query().Get("initial"))
+	assert.Equal(t, "1", r0.Request.URL.Query().Get("count"))
+
+	streamControl.EndAll()
+	<-stream.Errors // Accept the error to unblock the retry handler
+
+	r1 := <-requestsCh
+	assert.Equal(t, "payload is set", r1.Request.URL.Query().Get("initial"))
+	assert.Equal(t, "2", r1.Request.URL.Query().Get("count"))
+
+	streamControl.EndAll()
+	<-stream.Errors // Accept the error to unblock the retry handler
+
+	r2 := <-requestsCh
+	assert.False(t, r2.Request.URL.Query().Has("initial"))
+	assert.False(t, r2.Request.URL.Query().Has("count"))
 }
 
 func TestStreamReconnectWithRequestBodySendsBodyTwice(t *testing.T) {
