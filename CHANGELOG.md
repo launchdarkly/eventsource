@@ -2,6 +2,13 @@
 
 All notable changes to the project will be documented in this file. This project adheres to [Semantic Versioning](http://semver.org).
 
+## [1.9.0](https://github.com/launchdarkly/eventsource/compare/v1.8.0...v1.9.0) (2025-04-21)
+
+
+### Features
+
+* Include response headers in subscription errors ([#46](https://github.com/launchdarkly/eventsource/issues/46)) ([271f33d](https://github.com/launchdarkly/eventsource/commit/271f33d1c064eb030c62d1a050ca2b6b476fd202))
+
 ## [1.8.0](https://github.com/launchdarkly/eventsource/compare/v1.7.1...v1.8.0) (2024-12-19)
 
 
