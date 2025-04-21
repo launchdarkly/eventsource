@@ -16,8 +16,19 @@ func handlerCausingNetworkError() http.Handler {
 	return httphelpers.BrokenConnectionHandler()
 }
 
-func handlerCausingHTTPError(status int) http.Handler {
-	return httphelpers.HandlerWithStatus(status)
+func handlerCausingHTTPError(status int, header *http.Header) http.Handler {
+	if header == nil {
+		return httphelpers.HandlerWithStatus(status)
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for key, values := range *header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		httphelpers.HandlerWithStatus(status).ServeHTTP(w, r)
+	})
 }
 
 func shouldBeNetworkError(t *testing.T) func(error) {
@@ -28,9 +39,24 @@ func shouldBeNetworkError(t *testing.T) func(error) {
 	}
 }
 
-func shouldBeHTTPError(t *testing.T, status int) func(error) {
+func shouldBeHTTPError(t *testing.T, status int, header *http.Header) func(error) {
 	return func(err error) {
-		assert.Equal(t, SubscriptionError{Code: status}, err)
+		switch e := err.(type) {
+		case SubscriptionError:
+			assert.Equal(t, status, e.Code)
+			if header != nil {
+				for key, value := range *header {
+					if v, ok := e.Header[key]; ok {
+						assert.Equal(t, v, value)
+					} else {
+						assert.Fail(t, "header not found", "header %s not found in error headers", key)
+					}
+				}
+			}
+		default:
+			t.Errorf("expected SubscriptionError, got %T", e)
+			return
+		}
 	}
 }
 
@@ -39,7 +65,10 @@ func TestStreamDoesNotRetryInitialConnectionByDefaultAfterNetworkError(t *testin
 }
 
 func TestStreamDoesNotRetryInitialConnectionByDefaultAfterHTTPError(t *testing.T) {
-	testStreamDoesNotRetryInitialConnectionByDefault(t, handlerCausingHTTPError(401), shouldBeHTTPError(t, 401))
+	header := http.Header{
+		"X-My-Header": []string{"my-value"},
+	}
+	testStreamDoesNotRetryInitialConnectionByDefault(t, handlerCausingHTTPError(401, &header), shouldBeHTTPError(t, 401, &header))
 }
 
 func testStreamDoesNotRetryInitialConnectionByDefault(t *testing.T, errorHandler http.Handler, checkError func(error)) {
@@ -135,7 +164,7 @@ func TestStreamErrorHandlerCanAllowRetryOfInitialConnectionAfterNetworkError(t *
 }
 
 func TestStreamErrorHandlerCanAllowRetryOfInitialConnectionAfterHTTPError(t *testing.T) {
-	testStreamErrorHandlerCanAllowRetryOfInitialConnection(t, handlerCausingHTTPError(401), shouldBeHTTPError(t, 401))
+	testStreamErrorHandlerCanAllowRetryOfInitialConnection(t, handlerCausingHTTPError(401, nil), shouldBeHTTPError(t, 401, nil))
 }
 
 func testStreamErrorHandlerCanAllowRetryOfInitialConnection(t *testing.T, errorHandler http.Handler, checkError func(error)) {

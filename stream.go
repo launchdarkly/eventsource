@@ -56,6 +56,7 @@ var (
 type SubscriptionError struct {
 	Code    int
 	Message string
+	Header  http.Header
 }
 
 func (e SubscriptionError) Error() string {
@@ -258,6 +259,7 @@ func (stream *Stream) connect() (io.ReadCloser, error) {
 		err = SubscriptionError{
 			Code:    resp.StatusCode,
 			Message: string(message),
+			Header:  resp.Header,
 		}
 		return nil, err
 	}
