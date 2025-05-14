@@ -241,10 +241,10 @@ func (srv *Server) PublishWithAcknowledgment(channels []string, ev Event) <-chan
 }
 
 // PublishComment publishes a comment to one or more channels.
-func (srv *Server) PublishComment(channels []string, text Comment) {
+func (srv *Server) PublishComment(channels []string, text string) {
 	srv.pub <- &outbound{
 		channels:       channels,
-		eventOrComment: text,
+		eventOrComment: Comment(text),
 	}
 }
 
