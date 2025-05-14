@@ -60,7 +60,7 @@ func TestEncoderMultiLineData(t *testing.T) {
 
 func TestEncoderComment(t *testing.T) {
 	buf := bytes.NewBuffer(nil)
-	c := comment{value: "hello"}
+	c := Comment("hello")
 	NewEncoder(buf, false).Encode(c)
 	assert.Equal(t, ":hello\n", string(buf.Bytes()))
 }
