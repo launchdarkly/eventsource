@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -51,6 +52,27 @@ func TestNewServerHandlerRespondsAfterClose(t *testing.T) {
 	case <-time.After(250 * time.Millisecond):
 		t.Errorf("Did not receive response in time")
 	}
+}
+
+func TestServerHandlesLoadsOfPendingTasks(t *testing.T) {
+	channel := "test"
+	server := NewServer()
+	httpServer := httptest.NewServer(server.Handler(channel))
+	defer httpServer.Close()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func() {
+		_, _ = http.Get(httpServer.URL)
+		wg.Wait()
+	}()
+
+	server.Register(channel, &testServerRepository{})
+	for i := 0; i < 1000; i++ {
+		server.PublishComment([]string{channel}, "my comment")
+	}
+	wg.Done()
 }
 
 func TestServerHandlerReceivesPublishedEvents(t *testing.T) {

@@ -351,6 +351,10 @@ func (s *subscription) send(e eventOrComment) bool {
 //
 // This should be called only from the Server.run() goroutine.
 func (s *subscription) close() {
+	if s.out == nil {
+		return
+	}
+
 	close(s.out)
 	s.out = nil
 }
