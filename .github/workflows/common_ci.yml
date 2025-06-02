@@ -41,6 +41,7 @@ jobs:
         with:
           test_service_port: ${{ env.TEST_SERVICE_PORT }}
           token: ${{ secrets.GITHUB_TOKEN }}
+          repo: sse-contract-tests
       - name: Upload test service logs
         uses: actions/upload-artifact@v4
         with:
