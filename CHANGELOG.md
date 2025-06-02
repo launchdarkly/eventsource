@@ -2,6 +2,13 @@
 
 All notable changes to the project will be documented in this file. This project adheres to [Semantic Versioning](http://semver.org).
 
+## [1.9.1](https://github.com/launchdarkly/eventsource/compare/v1.9.0...v1.9.1) (2025-06-02)
+
+
+### Bug Fixes
+
+* Prevent close on a nil channel ([#49](https://github.com/launchdarkly/eventsource/issues/49)) ([efc49c6](https://github.com/launchdarkly/eventsource/commit/efc49c6f67340ffb38fe56341623977749ab75a8))
+
 ## [1.9.0](https://github.com/launchdarkly/eventsource/compare/v1.8.0...v1.9.0) (2025-04-21)
 
 
