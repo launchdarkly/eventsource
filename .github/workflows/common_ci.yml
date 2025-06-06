@@ -36,7 +36,7 @@ jobs:
         id: go-version
       - name: Start test service in background
         run: make start-contract-test-service-bg
-      - uses: launchdarkly/gh-actions/actions/contract-tests@contract-tests-v1.0.2
+      - uses: launchdarkly/gh-actions/actions/contract-tests@contract-tests-v1.1.0
         with:
           test_service_port: ${{ env.TEST_SERVICE_PORT }}
           token: ${{ secrets.GITHUB_TOKEN }}
