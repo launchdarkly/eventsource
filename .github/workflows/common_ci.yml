@@ -34,14 +34,16 @@ jobs:
           go-version: ${{ inputs.go-version }}
       - uses: ./.github/actions/get-go-version
         id: go-version
+      - name: Build test service
+        run: make build-contract-tests
       - name: Start test service in background
         run: make start-contract-test-service-bg
-      - uses: launchdarkly/gh-actions/actions/contract-tests@contract-tests-v1.0.2
-        continue-on-error: true
+      - uses: launchdarkly/gh-actions/actions/contract-tests@contract-tests-v1.1.0
         with:
           test_service_port: ${{ env.TEST_SERVICE_PORT }}
           token: ${{ secrets.GITHUB_TOKEN }}
           repo: sse-contract-tests
+          branch: main
       - name: Upload test service logs
         uses: actions/upload-artifact@v4
         with:
