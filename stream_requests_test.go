@@ -11,7 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/launchdarkly/go-test-helpers/v2/httphelpers"
+	"github.com/launchdarkly/go-test-helpers/v3/httphelpers"
 )
 
 func TestStreamCanUseCustomClient(t *testing.T) {

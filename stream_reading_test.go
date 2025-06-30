@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/launchdarkly/go-test-helpers/v2/httphelpers"
+	"github.com/launchdarkly/go-test-helpers/v3/httphelpers"
 )
 
 func TestStreamSubscribeEventsChan(t *testing.T) {
@@ -24,6 +24,25 @@ func TestStreamSubscribeEventsChan(t *testing.T) {
 	select {
 	case receivedEvent := <-stream.Events:
 		assert.Equal(t, &publication{id: "123", lastEventID: "123"}, receivedEvent)
+	case <-time.After(timeToWaitForEvent):
+		t.Error("Timed out waiting for event")
+	}
+}
+
+func TestStreamCanReadEnvironmentID(t *testing.T) {
+	streamHandler, streamControl := httphelpers.SSEHandlerWithEnvironmentID(nil, "env-id")
+	defer streamControl.Close()
+	httpServer := httptest.NewServer(streamHandler)
+	defer httpServer.Close()
+
+	stream := mustSubscribe(t, httpServer.URL)
+	defer stream.Close()
+
+	streamControl.Send(httphelpers.SSEEvent{ID: "123"})
+
+	select {
+	case receivedEvent := <-stream.Events:
+		assert.Equal(t, &publication{id: "123", lastEventID: "123", environmentID: "env-id"}, receivedEvent)
 	case <-time.After(timeToWaitForEvent):
 		t.Error("Timed out waiting for event")
 	}

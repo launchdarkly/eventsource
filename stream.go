@@ -127,9 +127,9 @@ func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOpti
 		initialRetryTimeoutCh = time.After(configuredOptions.initialRetryTimeout)
 	}
 	for {
-		r, err := stream.connect()
+		r, h, err := stream.connect()
 		if err == nil {
-			go stream.stream(r)
+			go stream.stream(r, h)
 			return stream, nil
 		}
 		lastError = err
@@ -229,7 +229,7 @@ func (stream *Stream) Close() {
 	})
 }
 
-func (stream *Stream) connect() (io.ReadCloser, error) {
+func (stream *Stream) connect() (io.ReadCloser, http.Header, error) {
 	var err error
 	var resp *http.Response
 	stream.req.Header.Set("Cache-Control", "no-cache")
@@ -245,12 +245,12 @@ func (stream *Stream) connect() (io.ReadCloser, error) {
 	// All but the initial connection will need to regenerate the body
 	if stream.connections > 0 && req.GetBody != nil {
 		if req.Body, err = req.GetBody(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	if resp, err = stream.c.Do(&req); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	stream.connections++
 	if resp.StatusCode != 200 {
@@ -261,12 +261,12 @@ func (stream *Stream) connect() (io.ReadCloser, error) {
 			Message: string(message),
 			Header:  resp.Header,
 		}
-		return nil, err
+		return nil, nil, err
 	}
-	return resp.Body, nil
+	return resp.Body, resp.Header, nil
 }
 
-func (stream *Stream) stream(r io.ReadCloser) {
+func (stream *Stream) stream(r io.ReadCloser, h http.Header) {
 	retryChan := make(chan struct{}, 1)
 
 	scheduleRetry := func() {
@@ -302,6 +302,7 @@ NewStream:
 			dec := NewDecoderWithOptions(r,
 				DecoderOptionReadTimeout(stream.readTimeout),
 				DecoderOptionLastEventID(stream.lastEventID),
+				DecoderOptionEnvironmentID(h.Get("X-Ld-Envid")),
 			)
 			go func() {
 				for {
@@ -358,9 +359,10 @@ NewStream:
 				break NewStream
 			case <-retryChan:
 				var err error
-				r, err = stream.connect()
+				r, h, err = stream.connect()
 				if err != nil {
 					r = nil
+					h = nil
 					if !reportErrorAndMaybeContinue(err) {
 						break NewStream
 					}

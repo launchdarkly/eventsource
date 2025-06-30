@@ -9,8 +9,8 @@ import (
 )
 
 type publication struct {
-	id, event, data, lastEventID string
-	retry                        int64
+	id, event, data, lastEventID, environmentID string
+	retry                                       int64
 }
 
 //nolint:revive,stylecheck // should be ID; retained for backward compatibility
@@ -22,12 +22,16 @@ func (s *publication) Retry() int64  { return s.retry }
 // LastEventID is from a separate interface, EventWithLastID
 func (s *publication) LastEventID() string { return s.lastEventID }
 
+// EnvironmentID is from a separate interface, EventWithEnvironmentID
+func (s *publication) EnvironmentID() string { return s.environmentID }
+
 // A Decoder is capable of reading Events from a stream.
 type Decoder struct {
-	linesCh     <-chan string
-	errorCh     <-chan error
-	readTimeout time.Duration
-	lastEventID string
+	linesCh       <-chan string
+	errorCh       <-chan error
+	readTimeout   time.Duration
+	lastEventID   string
+	environmentID string
 }
 
 // DecoderOption is a common interface for optional configuration parameters that can be
@@ -48,6 +52,12 @@ func (o lastEventIDDecoderOption) apply(d *Decoder) {
 	d.lastEventID = string(o)
 }
 
+type envrionmentIDDecoderOption string
+
+func (o envrionmentIDDecoderOption) apply(d *Decoder) {
+	d.environmentID = string(o)
+}
+
 // DecoderOptionReadTimeout returns an option that sets the read timeout interval for a
 // Decoder when the Decoder is created. If the Decoder does not receive new data within this
 // length of time, it will return an error. By default, there is no read timeout.
@@ -60,6 +70,13 @@ func DecoderOptionReadTimeout(timeout time.Duration) DecoderOption {
 // events if they do not override it.
 func DecoderOptionLastEventID(lastEventID string) DecoderOption {
 	return lastEventIDDecoderOption(lastEventID)
+}
+
+// DecoderOptionEnvironmentID returns an option that sets the environment ID property for a
+// Decoder when the Decoder is created. This allows the environment ID to be read from the
+// X-Ld-Envid response header and included in new events.
+func DecoderOptionEnvironmentID(environmentID string) DecoderOption {
+	return envrionmentIDDecoderOption(environmentID)
 }
 
 // NewDecoder returns a new Decoder instance that reads events with the given io.Reader.
@@ -152,6 +169,7 @@ ReadLoop:
 	}
 	pub.data = strings.TrimSuffix(pub.data, "\n")
 	pub.lastEventID = dec.lastEventID
+	pub.environmentID = dec.environmentID
 	return pub, nil
 }
 
