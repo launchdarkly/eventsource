@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"sync"
@@ -254,7 +253,7 @@ func (stream *Stream) connect() (io.ReadCloser, http.Header, error) {
 	}
 	stream.connections++
 	if resp.StatusCode != 200 {
-		message, _ := ioutil.ReadAll(resp.Body)
+		message, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		err = SubscriptionError{
 			Code:    resp.StatusCode,
