@@ -3,14 +3,16 @@ package eventsource
 import (
 	"bufio"
 	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
 )
 
 type publication struct {
-	id, event, data, lastEventID, environmentID string
-	retry                                       int64
+	id, event, data, lastEventID string
+	headers                      http.Header
+	retry                        int64
 }
 
 //nolint:revive,stylecheck // should be ID; retained for backward compatibility
@@ -22,16 +24,16 @@ func (s *publication) Retry() int64  { return s.retry }
 // LastEventID is from a separate interface, EventWithLastID
 func (s *publication) LastEventID() string { return s.lastEventID }
 
-// EnvironmentID is from a separate interface, EventWithEnvironmentID
-func (s *publication) EnvironmentID() string { return s.environmentID }
+// Headers is from a separate interface, EventWithHeaders
+func (s *publication) Headers() http.Header { return s.headers }
 
 // A Decoder is capable of reading Events from a stream.
 type Decoder struct {
-	linesCh       <-chan string
-	errorCh       <-chan error
-	readTimeout   time.Duration
-	lastEventID   string
-	environmentID string
+	linesCh     <-chan string
+	errorCh     <-chan error
+	readTimeout time.Duration
+	lastEventID string
+	headers     http.Header
 }
 
 // DecoderOption is a common interface for optional configuration parameters that can be
@@ -52,10 +54,10 @@ func (o lastEventIDDecoderOption) apply(d *Decoder) {
 	d.lastEventID = string(o)
 }
 
-type envrionmentIDDecoderOption string
+type headersDecoderOption http.Header
 
-func (o envrionmentIDDecoderOption) apply(d *Decoder) {
-	d.environmentID = string(o)
+func (o headersDecoderOption) apply(d *Decoder) {
+	d.headers = http.Header(o)
 }
 
 // DecoderOptionReadTimeout returns an option that sets the read timeout interval for a
@@ -72,11 +74,11 @@ func DecoderOptionLastEventID(lastEventID string) DecoderOption {
 	return lastEventIDDecoderOption(lastEventID)
 }
 
-// DecoderOptionEnvironmentID returns an option that sets the environment ID property for a
-// Decoder when the Decoder is created. This allows the environment ID to be read from the
-// X-Ld-Envid response header and included in new events.
-func DecoderOptionEnvironmentID(environmentID string) DecoderOption {
-	return envrionmentIDDecoderOption(environmentID)
+// DecoderOptionHeaders returns an option that sets the Headers property for a
+// Decoder when the Decoder is created. This allows access to the HTTP response
+// headers for the event.
+func DecoderOptionHeaders(headers http.Header) DecoderOption {
+	return headersDecoderOption(headers)
 }
 
 // NewDecoder returns a new Decoder instance that reads events with the given io.Reader.
@@ -169,7 +171,7 @@ ReadLoop:
 	}
 	pub.data = strings.TrimSuffix(pub.data, "\n")
 	pub.lastEventID = dec.lastEventID
-	pub.environmentID = dec.environmentID
+	pub.headers = dec.headers
 	return pub, nil
 }
 

@@ -2,6 +2,7 @@ package eventsource
 
 import (
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -57,11 +58,11 @@ func requireLastEventID(t *testing.T, event Event) string {
 	return eventWithID.LastEventID()
 }
 
-func requireEnvironmentId(t *testing.T, event Event) string {
-	// necessary because we can't yet add EnvironmentID to the basic Event interface; see EventWithEnvironmentID
-	eventWithEnvID, ok := event.(EventWithEnvironmentID)
-	require.True(t, ok, "event should have implemented EventWithEnvironmentID")
-	return eventWithEnvID.EnvironmentID()
+func requireHeaders(t *testing.T, event Event) http.Header {
+	// necessary because we can't yet add Headers to the basic Event interface; see EventWithHeaders
+	eventWithHeaders, ok := event.(EventWithHeaders)
+	require.True(t, ok, "event should have implemented EventWithHeaders")
+	return eventWithHeaders.Headers()
 }
 
 func TestDecoderTracksLastEventID(t *testing.T) {
@@ -123,16 +124,20 @@ func TestDecoderTracksLastEventID(t *testing.T) {
 	})
 }
 
-func TestDecoderTracksEnvironmentID(t *testing.T) {
-	t.Run("uses environment ID that is passed in options", func(t *testing.T) {
+func TestDecoderTracksHeaders(t *testing.T) {
+	t.Run("uses headers that are passed in options", func(t *testing.T) {
 		inputData := "data: abc\n\n"
-		decoder := NewDecoderWithOptions(strings.NewReader(inputData), DecoderOptionEnvironmentID("env-id"))
+		headers := http.Header{
+			"X-Ld-Envid": {"env-id"},
+		}
+
+		decoder := NewDecoderWithOptions(strings.NewReader(inputData), DecoderOptionHeaders(headers))
 
 		event, err := decoder.Decode()
 		require.NoError(t, err)
 
 		assert.Equal(t, "abc", event.Data())
 		assert.Equal(t, "", event.Id())
-		assert.Equal(t, "env-id", requireEnvironmentId(t, event))
+		assert.Equal(t, headers, requireHeaders(t, event))
 	})
 }

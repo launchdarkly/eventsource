@@ -5,6 +5,8 @@
 // If the Repository interface is implemented on the server, events can be replayed in case of a network disconnection.
 package eventsource
 
+import "net/http"
+
 // Event is the interface for any event received by the client or sent by the server.
 type Event interface {
 	// Id is an identifier that can be used to allow a client to replay
@@ -32,18 +34,17 @@ type EventWithLastID interface {
 	LastEventID() string
 }
 
-// EventWithEnvironmentID is an additional interface for an event received by the client,
-// allowing access to the EnvironmentID method.
+// EventWithHeaders is an additional interface for an event received by the client,
+// allowing access to the HTTP response headers.
 //
 // This is defined as a separate interface for backward compatibility, since this
 // feature was added after the Event interface had been defined and adding a method
 // to Event would break existing implementations. All events returned by Stream do
 // implement this interface, and in a future major version the Event type will be
 // changed to always include this field.
-type EventWithEnvironmentID interface {
-	// EnvironmentID is the value of the `X-Ld-Envid` response header that was most recently
-	// seen in an event from this stream, if any.
-	EnvironmentID() string
+type EventWithHeaders interface {
+	// Headers provides access to the HTTP response headers for the event.
+	Headers() http.Header
 }
 
 // Repository is an interface to be used with Server.Register() allowing clients to replay previous events

@@ -23,13 +23,17 @@ func TestStreamSubscribeEventsChan(t *testing.T) {
 
 	select {
 	case receivedEvent := <-stream.Events:
-		assert.Equal(t, &publication{id: "123", lastEventID: "123"}, receivedEvent)
+		receivedWithLastId := receivedEvent.(EventWithLastID)
+		receivedWithHeaders := receivedEvent.(EventWithHeaders)
+		assert.Equal(t, "123", receivedEvent.Id())
+		assert.Equal(t, "123", receivedWithLastId.LastEventID())
+		assert.NotEmpty(t, receivedWithHeaders.Headers())
 	case <-time.After(timeToWaitForEvent):
 		t.Error("Timed out waiting for event")
 	}
 }
 
-func TestStreamCanReadEnvironmentID(t *testing.T) {
+func TestStreamCanReadSpecificHeader(t *testing.T) {
 	streamHandler, streamControl := httphelpers.SSEHandlerWithEnvironmentID(nil, "env-id")
 	defer streamControl.Close()
 	httpServer := httptest.NewServer(streamHandler)
@@ -42,7 +46,8 @@ func TestStreamCanReadEnvironmentID(t *testing.T) {
 
 	select {
 	case receivedEvent := <-stream.Events:
-		assert.Equal(t, &publication{id: "123", lastEventID: "123", environmentID: "env-id"}, receivedEvent)
+		receivedWithHeaders := receivedEvent.(EventWithHeaders)
+		assert.Equal(t, "env-id", receivedWithHeaders.Headers().Get("X-Ld-Envid"))
 	case <-time.After(timeToWaitForEvent):
 		t.Error("Timed out waiting for event")
 	}

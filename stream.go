@@ -301,7 +301,7 @@ NewStream:
 			dec := NewDecoderWithOptions(r,
 				DecoderOptionReadTimeout(stream.readTimeout),
 				DecoderOptionLastEventID(stream.lastEventID),
-				DecoderOptionEnvironmentID(h.Get("X-Ld-Envid")),
+				DecoderOptionHeaders(h),
 			)
 			go func() {
 				for {
