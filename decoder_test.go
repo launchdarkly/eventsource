@@ -2,6 +2,7 @@ package eventsource
 
 import (
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -57,6 +58,13 @@ func requireLastEventID(t *testing.T, event Event) string {
 	return eventWithID.LastEventID()
 }
 
+func requireHeaders(t *testing.T, event Event) http.Header {
+	// necessary because we can't yet add Headers to the basic Event interface; see EventWithHeaders
+	eventWithHeaders, ok := event.(EventWithHeaders)
+	require.True(t, ok, "event should have implemented EventWithHeaders")
+	return eventWithHeaders.Headers()
+}
+
 func TestDecoderTracksLastEventID(t *testing.T) {
 	t.Run("uses last ID that is passed in options", func(t *testing.T) {
 		inputData := "data: abc\n\n"
@@ -68,32 +76,6 @@ func TestDecoderTracksLastEventID(t *testing.T) {
 		assert.Equal(t, "abc", event.Data())
 		assert.Equal(t, "", event.Id())
 		assert.Equal(t, "my-id", requireLastEventID(t, event))
-	})
-
-	t.Run("last ID persists if not overridden", func(t *testing.T) {
-		inputData := "id: abc\ndata: first\n\ndata: second\n\nid: def\ndata:third\n\n"
-		decoder := NewDecoderWithOptions(strings.NewReader(inputData), DecoderOptionLastEventID("my-id"))
-
-		event1, err := decoder.Decode()
-		require.NoError(t, err)
-
-		assert.Equal(t, "first", event1.Data())
-		assert.Equal(t, "abc", event1.Id())
-		assert.Equal(t, "abc", requireLastEventID(t, event1))
-
-		event2, err := decoder.Decode()
-		require.NoError(t, err)
-
-		assert.Equal(t, "second", event2.Data())
-		assert.Equal(t, "", event2.Id())
-		assert.Equal(t, "abc", requireLastEventID(t, event2))
-
-		event3, err := decoder.Decode()
-		require.NoError(t, err)
-
-		assert.Equal(t, "third", event3.Data())
-		assert.Equal(t, "def", event3.Id())
-		assert.Equal(t, "def", requireLastEventID(t, event3))
 	})
 
 	t.Run("last ID persists if not overridden", func(t *testing.T) {
@@ -139,5 +121,56 @@ func TestDecoderTracksLastEventID(t *testing.T) {
 		assert.Equal(t, "second", event2.Data())
 		assert.Equal(t, "", event2.Id())
 		assert.Equal(t, "", requireLastEventID(t, event2))
+	})
+}
+
+func TestDecoderTracksHeaders(t *testing.T) {
+	t.Run("event headers is nil if not provided in options", func(t *testing.T) {
+		inputData := "data: abc\n\n"
+
+		decoder := NewDecoderWithOptions(strings.NewReader(inputData))
+
+		event, err := decoder.Decode()
+		require.NoError(t, err)
+
+		assert.Equal(t, "abc", event.Data())
+		assert.Equal(t, "", event.Id())
+		assert.Nil(t, requireHeaders(t, event))
+	})
+
+	t.Run("uses headers that are passed in options", func(t *testing.T) {
+		inputData := "data: abc\n\n"
+		headers := http.Header{
+			"X-Ld-Envid": {"env-id"},
+		}
+
+		decoder := NewDecoderWithOptions(strings.NewReader(inputData), DecoderOptionHeaders(headers))
+
+		event, err := decoder.Decode()
+		require.NoError(t, err)
+
+		assert.Equal(t, "abc", event.Data())
+		assert.Equal(t, "", event.Id())
+		assert.Equal(t, headers, requireHeaders(t, event))
+	})
+
+	t.Run("event headers are immutable", func(t *testing.T) {
+		inputData := "data: abc\n\n"
+		headers := http.Header{
+			"X-Ld-Envid": {"env-id"},
+		}
+
+		decoder := NewDecoderWithOptions(strings.NewReader(inputData), DecoderOptionHeaders(headers))
+
+		event, err := decoder.Decode()
+		require.NoError(t, err)
+
+		eventHeaders := requireHeaders(t, event)
+		assert.Equal(t, "abc", event.Data())
+		assert.Equal(t, "", event.Id())
+		assert.Equal(t, headers, eventHeaders)
+
+		eventHeaders.Add("New-Header", "new-value")
+		assert.NotContains(t, headers, "New-Header")
 	})
 }
