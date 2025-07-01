@@ -2,6 +2,13 @@
 
 All notable changes to the project will be documented in this file. This project adheres to [Semantic Versioning](http://semver.org).
 
+## [1.10.0](https://github.com/launchdarkly/eventsource/compare/v1.9.1...v1.10.0) (2025-07-01)
+
+
+### Features
+
+* Add header support ([#53](https://github.com/launchdarkly/eventsource/issues/53)) ([b3a725f](https://github.com/launchdarkly/eventsource/commit/b3a725fa09fb8fb5e6d4ec76483f278809c7f1f4))
+
 ## [1.9.1](https://github.com/launchdarkly/eventsource/compare/v1.9.0...v1.9.1) (2025-06-02)
 
 
