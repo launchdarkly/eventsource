@@ -25,7 +25,12 @@ func (s *publication) Retry() int64  { return s.retry }
 func (s *publication) LastEventID() string { return s.lastEventID }
 
 // Headers is from a separate interface, EventWithHeaders
-func (s *publication) Headers() http.Header { return s.headers }
+func (s *publication) Headers() http.Header {
+	if s.headers == nil {
+		return nil
+	}
+	return s.headers.Clone()
+}
 
 // A Decoder is capable of reading Events from a stream.
 type Decoder struct {

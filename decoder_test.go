@@ -125,6 +125,19 @@ func TestDecoderTracksLastEventID(t *testing.T) {
 }
 
 func TestDecoderTracksHeaders(t *testing.T) {
+	t.Run("event headers is nil if not provided in options", func(t *testing.T) {
+		inputData := "data: abc\n\n"
+
+		decoder := NewDecoderWithOptions(strings.NewReader(inputData))
+
+		event, err := decoder.Decode()
+		require.NoError(t, err)
+
+		assert.Equal(t, "abc", event.Data())
+		assert.Equal(t, "", event.Id())
+		assert.Nil(t, requireHeaders(t, event))
+	})
+
 	t.Run("uses headers that are passed in options", func(t *testing.T) {
 		inputData := "data: abc\n\n"
 		headers := http.Header{
@@ -139,5 +152,25 @@ func TestDecoderTracksHeaders(t *testing.T) {
 		assert.Equal(t, "abc", event.Data())
 		assert.Equal(t, "", event.Id())
 		assert.Equal(t, headers, requireHeaders(t, event))
+	})
+
+	t.Run("event headers are immutable", func(t *testing.T) {
+		inputData := "data: abc\n\n"
+		headers := http.Header{
+			"X-Ld-Envid": {"env-id"},
+		}
+
+		decoder := NewDecoderWithOptions(strings.NewReader(inputData), DecoderOptionHeaders(headers))
+
+		event, err := decoder.Decode()
+		require.NoError(t, err)
+
+		eventHeaders := requireHeaders(t, event)
+		assert.Equal(t, "abc", event.Data())
+		assert.Equal(t, "", event.Id())
+		assert.Equal(t, headers, eventHeaders)
+
+		eventHeaders.Add("New-Header", "new-value")
+		assert.NotContains(t, headers, "New-Header")
 	})
 }
