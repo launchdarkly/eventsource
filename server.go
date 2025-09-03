@@ -31,9 +31,7 @@ type unregistration struct {
 	forceDisconnect bool
 }
 
-type comment struct {
-	value string
-}
+type Comment string
 
 type eventBatch struct {
 	events <-chan Event
@@ -246,7 +244,7 @@ func (srv *Server) PublishWithAcknowledgment(channels []string, ev Event) <-chan
 func (srv *Server) PublishComment(channels []string, text string) {
 	srv.pub <- &outbound{
 		channels:       channels,
-		eventOrComment: comment{value: text},
+		eventOrComment: Comment(text),
 	}
 }
 

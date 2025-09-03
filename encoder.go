@@ -61,8 +61,8 @@ func (enc *Encoder) Encode(ec eventOrComment) error {
 		if _, err := io.WriteString(enc.w, "\n"); err != nil {
 			return fmt.Errorf("eventsource encode: %v", err)
 		}
-	case comment:
-		line := ":" + item.value + "\n"
+	case Comment:
+		line := ":" + string(item) + "\n"
 		if _, err := io.WriteString(enc.w, line); err != nil {
 			return fmt.Errorf("eventsource encode: %v", err)
 		}
