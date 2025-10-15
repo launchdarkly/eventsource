@@ -2,9 +2,9 @@ name: Unit Tests
 description: "Runs unit tests + linters and optionally gathers coverage."
 inputs:
   lint:
-    description: 'Whether to run linters.'
+    description: "Whether to run linters."
     required: false
-    default: 'false'
+    default: "false"
 
 runs:
   using: composite
@@ -25,7 +25,7 @@ runs:
       if: steps.test.outcome == 'success'
       id: process-test
       shell: bash
-      run: go run github.com/jstemmer/go-junit-report@v0.9.1 < raw_report.txt > junit_report.xml
+      run: go run github.com/jstemmer/go-junit-report@cc1f095d5cc5eca2844f5c5ea7bb37f6b9bf6cac < raw_report.txt > junit_report.xml
 
     - name: Upload test results
       if: steps.process-test.outcome == 'success'
