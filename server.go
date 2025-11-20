@@ -56,10 +56,23 @@ type Server struct {
 	quit            chan bool
 	isClosed        bool
 	isClosedMutex   sync.RWMutex
+	jitter          time.Duration
 }
 
 // NewServer creates a new Server instance.
 func NewServer() *Server {
+	var duration time.Duration
+	return NewServerWithJitter(duration)
+}
+
+// NewServerWithJitter creates a new Server instance with jitter support.
+//
+// WARNING: Intermediate events sent while another event send is pending WILL
+// BE DISCARDED. Loss of data will occur if used incorrectly.
+//
+// This method is for use by LaunchDarkly libraries ONLY. No guarantee is made
+// about backwards compatibility or future support.
+func NewServerWithJitter(jitter time.Duration) *Server {
 	srv := &Server{
 		registrations:   make(chan *registration),
 		unregistrations: make(chan *unregistration),
@@ -68,6 +81,7 @@ func NewServer() *Server {
 		unsubs:          make(chan *subscription, 2),
 		quit:            make(chan bool),
 		BufferSize:      128,
+		jitter:          jitter,
 	}
 	go srv.run()
 	return srv
@@ -157,6 +171,29 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 		closedNormally := false
 		closeNotify := req.Context().Done()
 
+		// The handler consumes events in two different modes -- either as soon as
+		// they arrive, or on some jitter-influenced delay.
+		//
+		// If the jitter value has been provided, the first event received will be
+		// delayed for some (delay/2, delay) amount of time. Events received until
+		// then are DISCARDED. If this seems excessive, it is!
+		//
+		// This jitter functionality is only meant to service the ping stream
+		// functionality. The ping stream sends identical "ping" events, so
+		// discarding intermediate values is a safe operation.
+
+		var delayedEvent eventOrComment
+		jitterStrategy := newDefaultJitter(0.5, 0)
+
+		usingJitter := srv.jitter > 0
+		var jitterTimer timer
+		if usingJitter {
+			jitterTimer = &goTimer{timer: time.NewTimer(jitterStrategy.applyJitter(srv.jitter))}
+			jitterTimer.Stop()
+		} else {
+			jitterTimer = &noopTimer{C: make(<-chan time.Time)}
+		}
+
 	ReadLoop:
 		for {
 			select {
@@ -164,17 +201,66 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 				break ReadLoop
 			case <-maxConnTimeCh: // if MaxConnTime was not set, this is a nil channel and has no effect on the select
 				break ReadLoop
+			case <-jitterTimer.Channel():
+				// If the jitter is 0, we may have an initial event that fired before
+				// we could stop the timer. Or maybe the channel is being closed.
+				// Whatever the reason, we can safely discard here.
+				if !usingJitter || delayedEvent == nil {
+					continue
+				}
+
+				ok := writeEventOrComment(delayedEvent)
+				delayedEvent = nil
+
+				if !ok {
+					break ReadLoop
+				}
 			case ev, ok := <-readMainCh:
 				if !ok {
 					closedNormally = true
 					break ReadLoop
 				}
+
 				if batch, ok := ev.(eventBatch); ok {
+					// If we receive an event batch, we are meant to switch to this as
+					// our input source. But before we can do that, we need to process
+					// any event that was pending processing.
+					if delayedEvent != nil {
+						jitterTimer.Stop()
+						ok := writeEventOrComment(delayedEvent)
+						delayedEvent = nil
+
+						if !ok {
+							break ReadLoop
+						}
+					}
+
 					readBatchCh = batch.events
 					readMainCh = nil
-				} else if !writeEventOrComment(ev) {
-					break ReadLoop
+					continue
 				}
+
+				// Write immediately if we aren't using the jitter functionality.
+				if !usingJitter {
+					if !writeEventOrComment(ev) {
+						break ReadLoop
+					}
+					continue
+				}
+
+				// If we are using jitter and we have a pending event, then we don't
+				// need to do anything. We can swallow this event.
+				if delayedEvent != nil {
+					continue
+				}
+
+				delayedEvent = ev
+
+				// Figure out the jitter and start the timer. Once this trigger, we
+				// will write the event and clear the way for a new event to come in.
+				delay := jitterStrategy.applyJitter(srv.jitter)
+				jitterTimer.Reset(delay)
+
 			case ev, ok := <-readBatchCh:
 				if !ok { // end of batch
 					readBatchCh = nil
@@ -357,4 +443,42 @@ func (s *subscription) close() {
 
 	close(s.out)
 	s.out = nil
+}
+
+type timer interface {
+	Channel() <-chan time.Time
+	Reset(time.Duration) bool
+	Stop() bool
+}
+
+type noopTimer struct {
+	C <-chan time.Time
+}
+
+func (n *noopTimer) Channel() <-chan time.Time {
+	return n.C
+}
+
+func (n *noopTimer) Reset(_ time.Duration) bool {
+	return true
+}
+
+func (n *noopTimer) Stop() bool {
+	return true
+}
+
+type goTimer struct {
+	timer *time.Timer
+}
+
+func (t *goTimer) Channel() <-chan time.Time {
+	return t.timer.C
+}
+
+func (t *goTimer) Reset(d time.Duration) bool {
+	return t.timer.Reset(d)
+}
+
+func (t *goTimer) Stop() bool {
+	return t.timer.Stop()
 }

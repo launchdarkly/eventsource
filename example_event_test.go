@@ -21,8 +21,8 @@ const (
 
 func TimePublisher(srv *eventsource.Server) {
 	start := time.Date(2013, time.January, 1, 0, 0, 0, 0, time.UTC)
-	ticker := time.NewTicker(time.Second)
-	for i := 0; i < TICK_COUNT; i++ {
+	ticker := time.NewTicker(1 * time.Millisecond)
+	for range TICK_COUNT {
 		<-ticker.C
 		srv.Publish([]string{"time"}, TimeEvent(start))
 		start = start.Add(time.Second)
@@ -45,7 +45,7 @@ func ExampleEvent() {
 	if err != nil {
 		return
 	}
-	for i := 0; i < TICK_COUNT; i++ {
+	for range TICK_COUNT {
 		ev := <-stream.Events
 		fmt.Println(ev.Id(), ev.Event(), ev.Data())
 	}
