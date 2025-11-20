@@ -2,6 +2,18 @@
 
 All notable changes to the project will be documented in this file. This project adheres to [Semantic Versioning](http://semver.org).
 
+## [1.11.0](https://github.com/launchdarkly/eventsource/compare/v1.10.0...v1.11.0) (2025-11-20)
+
+
+### Features
+
+* Support SSE server with event limited jitter support ([#58](https://github.com/launchdarkly/eventsource/issues/58)) ([7b0f448](https://github.com/launchdarkly/eventsource/commit/7b0f44863bcc9031d384ac03b48bf63c5eb21b5d))
+
+
+### Bug Fixes
+
+* Bump gopkg.in/yaml.v3 from 3.0.0 to 3.0.1 ([#55](https://github.com/launchdarkly/eventsource/issues/55)) ([7c0d519](https://github.com/launchdarkly/eventsource/commit/7c0d5194ec18f308df575bcee54f269c3d3fa8d8))
+
 ## [1.10.0](https://github.com/launchdarkly/eventsource/compare/v1.9.1...v1.10.0) (2025-07-01)
 
 
