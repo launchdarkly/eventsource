@@ -39,6 +39,13 @@ type eventBatch struct {
 	events <-chan Event
 }
 
+// maxEventsPerFlush caps how many batch events the handler encodes between flushes.
+// The value is large enough that the per-flush cost is fully amortized for big
+// replays, while keeping a deterministic bound on how long the handler can stay away
+// from its main select loop (which watches for connection close and MaxConnTime)
+// while a batch is streaming.
+const maxEventsPerFlush = 512
+
 // Server manages any number of event-publishing channels and allows subscribers to consume them.
 // To use it within an HTTP server, create a handler for each channel with Handler().
 type Server struct {
@@ -137,13 +144,20 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 		flusher.Flush()
 		enc := NewEncoder(w, useGzip)
 
-		writeEventOrComment := func(ec eventOrComment) bool {
+		encodeEventOrComment := func(ec eventOrComment) bool {
 			if err := enc.Encode(ec); err != nil {
 				srv.unsubs <- sub
 				if srv.Logger != nil {
 					srv.Logger.Println(err)
 				}
 				return false // if this happens, we'll end the handler early because something's clearly broken
+			}
+			return true
+		}
+
+		writeEventOrComment := func(ec eventOrComment) bool {
+			if !encodeEventOrComment(ec) {
+				return false
 			}
 			flusher.Flush()
 			return true
@@ -265,7 +279,15 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 				if !ok { // end of batch
 					readBatchCh = nil
 					readMainCh = eventCh
-				} else if !writeEventOrComment(ev) {
+					continue
+				}
+				encodeOK, batchDone := encodeAvailableBatchEvents(ev, readBatchCh, encodeEventOrComment)
+				if batchDone {
+					readBatchCh = nil
+					readMainCh = eventCh
+				}
+				flusher.Flush()
+				if !encodeOK {
 					break ReadLoop
 				}
 			}
@@ -410,6 +432,43 @@ func (srv *Server) markServerClosed() {
 	srv.isClosedMutex.Lock()
 	defer srv.isClosedMutex.Unlock()
 	srv.isClosed = true
+}
+
+// Encodes ev plus any further events that are immediately available from batch,
+// without flushing in between. Batches can contain many events that are already
+// available (for example, a replay of a large data set), and flushing the connection
+// after every one of them costs an HTTP chunk write per event; the caller flushes
+// once after this returns. Encoding stops when the channel goes momentarily quiet,
+// the batch ends, or maxEventsPerFlush events have been written. Memory stays
+// bounded either way -- the ResponseWriter's buffer writes through to the connection
+// as it fills, and a slow client blocks the encode -- but the cap guarantees the
+// handler returns to its select loop regularly, so connection shutdown and
+// MaxConnTime are still honored while a long batch is streaming.
+//
+// encodeOK is false if an encode failed (the handler should exit). batchDone is true
+// if the batch channel was closed.
+func encodeAvailableBatchEvents(
+	ev eventOrComment,
+	batch <-chan Event,
+	encode func(eventOrComment) bool,
+) (encodeOK, batchDone bool) {
+	for encoded := 1; ; encoded++ {
+		if !encode(ev) {
+			return false, false
+		}
+		if encoded >= maxEventsPerFlush {
+			return true, false // budget spent; do not pull another event before flushing
+		}
+		select {
+		case next, more := <-batch:
+			if !more {
+				return true, true
+			}
+			ev = next
+		default:
+			return true, false
+		}
+	}
 }
 
 // Attempts to send an event or comment to the subscription's channel.
