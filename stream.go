@@ -322,13 +322,25 @@ NewStream:
 			if r != nil {
 				_ = r.Close()
 				r = nil
-				// allow the decoding goroutine to terminate
-				//nolint:revive // false positive, need to drain the channels here
-				for range errs {
-				}
-				//nolint:revive // false positive, need to drain the channels here
-				for range events {
-				}
+				// Allow the decoding goroutine to terminate. After r.Close it will either return an
+				// error from Decode (sending on errs, then closing both channels) or, if it had
+				// already decoded an event, still be blocked sending that event on events. We must
+				// therefore drain both channels concurrently: draining them sequentially deadlocks
+				// if the goroutine is blocked sending on the one we are not yet reading (e.g. we
+				// wait on errs while it is stuck on events), and neither side can make progress.
+				var wg sync.WaitGroup
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					for range errs { //nolint:revive // draining until the channel is closed
+					}
+				}()
+				go func() {
+					defer wg.Done()
+					for range events { //nolint:revive // draining until the channel is closed
+					}
+				}()
+				wg.Wait()
 			}
 		}
 
