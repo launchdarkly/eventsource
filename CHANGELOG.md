@@ -2,6 +2,14 @@
 
 All notable changes to the project will be documented in this file. This project adheres to [Semantic Versioning](http://semver.org).
 
+## [1.11.1](https://github.com/launchdarkly/eventsource/compare/v1.11.0...v1.11.1) (2026-07-22)
+
+
+### Bug Fixes
+
+* prevent stream shutdown deadlock when Close races with event delivery ([1067581](https://github.com/launchdarkly/eventsource/commit/1067581e3157a740f943b8413285601f5f9d1d3f))
+* prevent stream shutdown deadlock when Close races with event delivery ([#60](https://github.com/launchdarkly/eventsource/issues/60)) ([c3ddae0](https://github.com/launchdarkly/eventsource/commit/c3ddae0cdbbe219da5f57b56349d3c08b6b5e45a))
+
 ## [1.11.0](https://github.com/launchdarkly/eventsource/compare/v1.10.0...v1.11.0) (2025-11-20)
 
 
