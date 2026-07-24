@@ -298,7 +298,7 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 // no subscriber will read again, so the goroutine producing those events can complete and release
 // its resources instead of blocking forever on a send.
 func drainReplayedEvents(ch <-chan Event) {
-	for range ch {
+	for range ch { //nolint:revive // draining until the channel is closed
 	}
 }
 
