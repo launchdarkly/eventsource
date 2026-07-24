@@ -286,15 +286,19 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 			// A Repository that implements RepositoryWithContext will already have been told to stop via
 			// context cancellation, but draining is harmless in that case and remains the safety net for
 			// repositories that only implement Replay.
-			go func(ch <-chan Event) {
-				for range ch {
-					// Discard any remaining events until the producer closes the channel.
-				}
-			}(readBatchCh)
+			go drainReplayedEvents(readBatchCh)
 		}
 		if !closedNormally {
 			srv.unsubs <- sub // the server didn't tell us to close, so we must tell it that we're closing
 		}
+	}
+}
+
+// drainReplayedEvents consumes and discards the events from a Repository replay batch channel that
+// no subscriber will read again, so the goroutine producing those events can complete and release
+// its resources instead of blocking forever on a send.
+func drainReplayedEvents(ch <-chan Event) {
+	for range ch {
 	}
 }
 
@@ -415,8 +419,12 @@ func (srv *Server) run() {
 					} else {
 						batchCh = repo.Replay(sub.channel, sub.lastEventID)
 					}
-					if batchCh != nil {
-						trySend(sub, eventBatch{events: batchCh})
+					if batchCh != nil && !sub.send(eventBatch{events: batchCh}) {
+						// The subscriber was already closed, so it will never consume this batch and
+						// its producer would otherwise block forever; drain it in the background.
+						sub.close()
+						delete(subs[sub.channel], sub)
+						go drainReplayedEvents(batchCh)
 					}
 				}
 			}
