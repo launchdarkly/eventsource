@@ -145,6 +145,13 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 				}
 				return false // if this happens, we'll end the handler early because something's clearly broken
 			}
+			return true
+		}
+
+		writeEventOrCommentAndFlush := func(ec eventOrComment) bool {
+			if !writeEventOrComment(ec) {
+				return false
+			}
 			flusher.Flush()
 			return true
 		}
@@ -209,7 +216,7 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 					continue
 				}
 
-				ok := writeEventOrComment(delayedEvent)
+				ok := writeEventOrCommentAndFlush(delayedEvent)
 				delayedEvent = nil
 
 				if !ok {
@@ -227,7 +234,7 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 					// any event that was pending processing.
 					if delayedEvent != nil {
 						jitterTimer.Stop()
-						ok := writeEventOrComment(delayedEvent)
+						ok := writeEventOrCommentAndFlush(delayedEvent)
 						delayedEvent = nil
 
 						if !ok {
@@ -242,7 +249,7 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 
 				// Write immediately if we aren't using the jitter functionality.
 				if !usingJitter {
-					if !writeEventOrComment(ev) {
+					if !writeEventOrCommentAndFlush(ev) {
 						break ReadLoop
 					}
 					continue
@@ -263,9 +270,13 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 
 			case ev, ok := <-readBatchCh:
 				if !ok { // end of batch
+					flusher.Flush()
 					readBatchCh = nil
 					readMainCh = eventCh
-				} else if !writeEventOrComment(ev) {
+					continue
+				}
+
+				if !writeEventOrComment(ev) {
 					break ReadLoop
 				}
 			}
