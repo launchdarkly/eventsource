@@ -5,7 +5,10 @@
 // If the Repository interface is implemented on the server, events can be replayed in case of a network disconnection.
 package eventsource
 
-import "net/http"
+import (
+	"context"
+	"net/http"
+)
 
 // Event is the interface for any event received by the client or sent by the server.
 type Event interface {
@@ -59,6 +62,45 @@ type Repository interface {
 	//
 	// Replay may return nil if there are no events to be sent.
 	Replay(channel, id string) chan Event
+}
+
+// RepositoryWithContext is an optional extension of Repository that allows a Repository to be
+// notified when the subscriber that requested a replay has gone away.
+//
+// A plain Repository.Replay receives only the channel and event id, and returns a bare channel;
+// it has no way to learn that the subscriber disconnected. If the subscriber disconnects while
+// the Repository's producer goroutine is still blocked sending an event, that goroutine can be
+// stranded until the server drains the channel on its behalf.
+//
+// If a registered Repository also implements RepositoryWithContext, the Server will call
+// ReplayWithContext instead of Replay, passing the subscribing request's context. That context
+// is cancelled when the subscriber disconnects (or when the connection is otherwise terminated),
+// so the producer can select on ctx.Done() and stop sending immediately, for example:
+//
+//	func (r *myRepo) ReplayWithContext(ctx context.Context, channel, id string) <-chan eventsource.Event {
+//	    out := make(chan eventsource.Event)
+//	    go func() {
+//	        defer close(out)
+//	        for _, event := range r.eventsFor(channel, id) {
+//	            select {
+//	            case out <- event:
+//	            case <-ctx.Done():
+//	                return
+//	            }
+//	        }
+//	    }()
+//	    return out
+//	}
+//
+// Implementing this interface is optional and does not change the behavior of Replay. A Repository
+// that implements only Replay continues to work unchanged; a Repository that implements both must
+// still provide Replay for backward compatibility.
+type RepositoryWithContext interface {
+	Repository
+	// ReplayWithContext behaves like Replay, but additionally receives a context that is cancelled
+	// when the subscriber goes away. It has the same channel-closing responsibilities as Replay,
+	// and may likewise return nil if there are no events to be sent.
+	ReplayWithContext(ctx context.Context, channel, id string) <-chan Event
 }
 
 // Logger is the interface for a custom logging implementation that can handle log output for a Stream.

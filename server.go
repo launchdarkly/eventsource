@@ -1,6 +1,7 @@
 package eventsource
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"sync"
@@ -11,6 +12,9 @@ type subscription struct {
 	channel     string
 	lastEventID string
 	out         chan<- eventOrComment
+	// ctx is the subscribing request's context. It is cancelled when the subscriber disconnects,
+	// and is passed to a Repository that implements RepositoryWithContext.
+	ctx context.Context
 }
 
 type eventOrComment interface{}
@@ -131,6 +135,7 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 			channel:     channel,
 			lastEventID: req.Header.Get("Last-Event-ID"),
 			out:         eventCh,
+			ctx:         req.Context(),
 		}
 		srv.subs <- sub
 		flusher := w.(http.Flusher)
@@ -270,6 +275,23 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 				}
 			}
 		}
+		if readBatchCh != nil {
+			// We are exiting the read loop while still in the middle of consuming a batch of replayed
+			// events from a Repository (e.g. the subscriber disconnected, or MaxConnTime elapsed). The
+			// Repository's producer goroutine may be blocked trying to send the remaining events on this
+			// channel. Since we hold the receiving end -- we can neither close it nor keep reading it on
+			// this exiting goroutine -- drain it in the background so the producer can unblock and release
+			// its resources promptly rather than leaking until the process exits.
+			//
+			// A Repository that implements RepositoryWithContext will already have been told to stop via
+			// context cancellation, but draining is harmless in that case and remains the safety net for
+			// repositories that only implement Replay.
+			go func(ch <-chan Event) {
+				for range ch {
+					// Discard any remaining events until the producer closes the channel.
+				}
+			}(readBatchCh)
+		}
 		if !closedNormally {
 			srv.unsubs <- sub // the server didn't tell us to close, so we must tell it that we're closing
 		}
@@ -383,7 +405,16 @@ func (srv *Server) run() {
 			if srv.ReplayAll || len(sub.lastEventID) > 0 {
 				repo, ok := repos[sub.channel]
 				if ok {
-					batchCh := repo.Replay(sub.channel, sub.lastEventID)
+					// If the repository supports it, pass the subscriber's context so its producer can
+					// stop sending promptly when the subscriber disconnects. Otherwise fall back to the
+					// original context-less Replay; the handler's background drain (see Handler) still
+					// ensures such a producer eventually unblocks.
+					var batchCh <-chan Event
+					if repoCtx, ok := repo.(RepositoryWithContext); ok {
+						batchCh = repoCtx.ReplayWithContext(sub.ctx, sub.channel, sub.lastEventID)
+					} else {
+						batchCh = repo.Replay(sub.channel, sub.lastEventID)
+					}
 					if batchCh != nil {
 						trySend(sub, eventBatch{events: batchCh})
 					}
