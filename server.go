@@ -295,41 +295,45 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 				}
 			}
 		}
-		if readBatchCh != nil {
-			// We are exiting the read loop while still in the middle of consuming a batch of replayed
-			// events from a Repository (e.g. the subscriber disconnected, or MaxConnTime elapsed). The
-			// Repository's producer goroutine may be blocked trying to send the remaining events on this
-			// channel. Since we hold the receiving end -- we can neither close it nor keep reading it on
-			// this exiting goroutine -- drain it in the background so the producer can unblock and release
-			// its resources promptly rather than leaking until the process exits.
-			//
-			// A Repository that implements RepositoryWithContext will already have been told to stop via
-			// context cancellation, but draining is harmless in that case and remains the safety net for
-			// repositories that only implement Replay.
-			go drainReplayedEvents(readBatchCh)
-		}
-		// A replay batch that the Server queued on eventCh but that the loop above never dequeued
-		// would strand its producer the same way. Server.run() drains such a batch when it
-		// processes our unsubscription (see the unsubs case there); this sweep of the values
-		// already buffered additionally covers the case where the Server has shut down and will
-		// never process it. Anything the Server enqueues concurrently with this sweep is still
-		// handled by the unsubs path.
-	SweepPending:
-		for {
-			select {
-			case ev, ok := <-eventCh:
-				if !ok {
-					break SweepPending
-				}
-				if batch, isBatch := ev.(eventBatch); isBatch {
-					go drainReplayedEvents(batch.events)
-				}
-			default:
-				break SweepPending
-			}
-		}
+		drainAbandonedBatches(readBatchCh, eventCh)
 		if !closedNormally {
 			unsubscribe() // the server didn't tell us to close, so we must tell it that we're closing
+		}
+	}
+}
+
+// drainAbandonedBatches unblocks Repository producers whose replay batches an exiting handler
+// will never consume: the batch it was reading when it exited, and any batch still queued
+// unread on its buffered event channel.
+//
+// current is the batch the handler was mid-way through consuming, or nil. Its producer may be
+// blocked sending the remaining events; since the handler holds the receiving end -- it can
+// neither close the channel nor keep reading it -- the batch is drained in the background so
+// the producer can unblock and release its resources promptly. A Repository that implements
+// RepositoryWithContext will already have been told to stop via context cancellation, but
+// draining is harmless in that case and remains the safety net for repositories that only
+// implement Replay.
+//
+// A batch the Server queued on the buffered event channel that the handler never dequeued
+// would strand its producer the same way. Server.run() drains such a batch when it processes
+// the handler's unsubscription; the sweep of the already-buffered values here additionally
+// covers the case where the Server has shut down and will never process it. Anything the
+// Server enqueues concurrently with this sweep is still handled by the unsubscription path.
+func drainAbandonedBatches(current <-chan Event, eventCh <-chan eventOrComment) {
+	if current != nil {
+		go drainReplayedEvents(current)
+	}
+	for {
+		select {
+		case ev, ok := <-eventCh:
+			if !ok {
+				return
+			}
+			if batch, isBatch := ev.(eventBatch); isBatch {
+				go drainReplayedEvents(batch.events)
+			}
+		default:
+			return
 		}
 	}
 }
