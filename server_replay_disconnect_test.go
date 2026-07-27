@@ -740,3 +740,61 @@ func TestReplayProducerUnblocksWhenServerCloses(t *testing.T) {
 
 	assertClosedWithin(t, repo.finished, "producer goroutine exit after server close")
 }
+
+// TestLateHandlerExitsDoNotBlockAfterServerClose verifies that handlers whose connections
+// fail after the Server has shut down do not block forever sending an unsubscription that
+// nothing will consume. More than two such handlers used to deadlock on the unsubs
+// channel's small buffer, pinning their connections (and any in-flight batch) open.
+func TestLateHandlerExitsDoNotBlockAfterServerClose(t *testing.T) {
+	const n = 4
+	mux := http.NewServeMux()
+	server := NewServer()
+	server.ReplayAll = true
+
+	repos := make([]*plainReplayRepo, n)
+	conns := make([]*net.TCPConn, n)
+	readers := make([]*sseReader, n)
+	for i := 0; i < n; i++ {
+		channel := "chan-" + strconv.Itoa(i)
+		repos[i] = newPlainReplayRepo()
+		server.Register(channel, repos[i])
+		mux.HandleFunc("/"+channel, server.Handler(channel))
+	}
+	httpServer := httptest.NewServer(mux)
+
+	// Position every handler mid-batch, so none of them observes the shutdown's
+	// close(out) (they are reading the batch channel, not the event channel).
+	for i := 0; i < n; i++ {
+		conns[i] = rawSSEConn(t, httpServer.URL+"/chan-"+strconv.Itoa(i))
+		<-repos[i].started
+		readers[i] = newSSEReader(t, conns[i])
+		readers[i].waitFor(t, "data: first")
+	}
+
+	server.Close()
+
+	// Now fail every connection abruptly and let the producers proceed. Each handler
+	// exits abnormally (write error or disconnect notification) and unsubscribes --
+	// with the Server gone, nothing consumes those sends.
+	for i := 0; i < n; i++ {
+		require.NoError(t, conns[i].SetLinger(0))
+		require.NoError(t, conns[i].Close())
+	}
+	time.Sleep(100 * time.Millisecond)
+	for i := 0; i < n; i++ {
+		close(repos[i].release)
+	}
+
+	for i := 0; i < n; i++ {
+		assertClosedWithin(t, repos[i].finished, fmt.Sprintf("producer %d exit", i))
+	}
+
+	// A handler blocked on the unsubscription send keeps its request active, which
+	// makes httptest's Close hang; all handlers exiting is what lets this complete.
+	closed := make(chan struct{})
+	go func() {
+		httpServer.Close()
+		close(closed)
+	}()
+	assertClosedWithin(t, closed, "http server shutdown (all handlers exited)")
+}

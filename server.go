@@ -63,9 +63,13 @@ type Server struct {
 	subs            chan *subscription
 	unsubs          chan *subscription
 	quit            chan bool
-	isClosed        bool
-	isClosedMutex   sync.RWMutex
-	jitter          time.Duration
+	// stopped is closed when run() exits, so that handlers which outlive the Server
+	// (e.g. a write error detected after Close) do not block forever sending an
+	// unsubscription that nothing will ever consume.
+	stopped       chan struct{}
+	isClosed      bool
+	isClosedMutex sync.RWMutex
+	jitter        time.Duration
 }
 
 // NewServer creates a new Server instance.
@@ -89,6 +93,7 @@ func NewServerWithJitter(jitter time.Duration) *Server {
 		subs:            make(chan *subscription),
 		unsubs:          make(chan *subscription, 2),
 		quit:            make(chan bool),
+		stopped:         make(chan struct{}),
 		BufferSize:      128,
 		jitter:          jitter,
 	}
@@ -147,9 +152,19 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 		flusher.Flush()
 		enc := NewEncoder(w, useGzip)
 
+		// unsubscribe tells the Server this handler is going away. After the Server has
+		// shut down nothing consumes unsubs (and its small buffer may already be full),
+		// so a handler that exits late must not block forever on the send.
+		unsubscribe := func() {
+			select {
+			case srv.unsubs <- sub:
+			case <-srv.stopped:
+			}
+		}
+
 		writeEventOrComment := func(ec eventOrComment) bool {
 			if err := enc.Encode(ec); err != nil {
-				srv.unsubs <- sub
+				unsubscribe()
 				if srv.Logger != nil {
 					srv.Logger.Println(err)
 				}
@@ -314,7 +329,7 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 			}
 		}
 		if !closedNormally {
-			srv.unsubs <- sub // the server didn't tell us to close, so we must tell it that we're closing
+			unsubscribe() // the server didn't tell us to close, so we must tell it that we're closing
 		}
 	}
 }
@@ -388,6 +403,7 @@ func (srv *Server) PublishComment(channels []string, text string) {
 }
 
 func (srv *Server) run() {
+	defer close(srv.stopped)
 	// All access to the subs and repos maps is done from the same goroutine, so modifications are safe.
 	subs := make(map[string]map[*subscription]struct{})
 	repos := make(map[string]Repository)
@@ -408,6 +424,12 @@ func (srv *Server) run() {
 			if unreg.forceDisconnect {
 				for s := range previousSubs {
 					s.close()
+					// Unlike the unsubscription and shutdown cases, no batch drain is needed
+					// here: the server keeps running. A buffered channel delivers its queued
+					// values before reporting closed, so the handler still dequeues and fully
+					// consumes an in-flight batch after close(out); if the handler instead
+					// exits abnormally, its own exit paths and its unsubscription (which run()
+					// is still alive to process) drain the batch.
 				}
 			}
 		case sub := <-srv.unsubs:
