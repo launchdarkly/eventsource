@@ -15,6 +15,11 @@ type subscription struct {
 	// ctx is the subscribing request's context. It is cancelled when the subscriber disconnects,
 	// and is passed to a Repository that implements RepositoryWithContext.
 	ctx context.Context
+	// batch is the replay batch channel that was handed to this subscription, if any. It is
+	// recorded so that if the handler exits without ever dequeuing the batch from its buffered
+	// event channel, the unsubscribe path can still drain it and unblock the Repository's
+	// producer. Accessed only from the Server.run() goroutine.
+	batch <-chan Event
 }
 
 type eventOrComment interface{}
@@ -288,6 +293,26 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 			// repositories that only implement Replay.
 			go drainReplayedEvents(readBatchCh)
 		}
+		// A replay batch that the Server queued on eventCh but that the loop above never dequeued
+		// would strand its producer the same way. Server.run() drains such a batch when it
+		// processes our unsubscription (see the unsubs case there); this sweep of the values
+		// already buffered additionally covers the case where the Server has shut down and will
+		// never process it. Anything the Server enqueues concurrently with this sweep is still
+		// handled by the unsubs path.
+	SweepPending:
+		for {
+			select {
+			case ev, ok := <-eventCh:
+				if !ok {
+					break SweepPending
+				}
+				if batch, isBatch := ev.(eventBatch); isBatch {
+					go drainReplayedEvents(batch.events)
+				}
+			default:
+				break SweepPending
+			}
+		}
 		if !closedNormally {
 			srv.unsubs <- sub // the server didn't tell us to close, so we must tell it that we're closing
 		}
@@ -387,6 +412,16 @@ func (srv *Server) run() {
 			}
 		case sub := <-srv.unsubs:
 			delete(subs[sub.channel], sub)
+			if sub.batch != nil {
+				// The handler has exited. If it never dequeued the replay batch from its event
+				// channel -- or exited partway through consuming it -- the Repository's producer
+				// may still be blocked sending on it; drain it so the producer can finish. If the
+				// batch was fully consumed, the channel is already closed and this goroutine exits
+				// immediately. Draining concurrently with the handler's own exit-time drain is
+				// safe: both simply receive until the channel is closed.
+				go drainReplayedEvents(sub.batch)
+				sub.batch = nil
+			}
 		case pub := <-srv.pub:
 			for _, c := range pub.channels {
 				for s := range subs[c] {
@@ -419,19 +454,54 @@ func (srv *Server) run() {
 					} else {
 						batchCh = repo.Replay(sub.channel, sub.lastEventID)
 					}
-					if batchCh != nil && !sub.send(eventBatch{events: batchCh}) {
-						// The subscriber was already closed, so it will never consume this batch and
-						// its producer would otherwise block forever; drain it in the background.
-						sub.close()
-						delete(subs[sub.channel], sub)
-						go drainReplayedEvents(batchCh)
+					if batchCh != nil {
+						if sub.send(eventBatch{events: batchCh}) {
+							// Remember the batch so that if the subscriber goes away before its
+							// handler dequeues it, the unsubs case below can still drain it.
+							sub.batch = batchCh
+						} else {
+							// The send failed because the subscription's buffer was full (send
+							// closes the subscription in that case). The batch will never be
+							// consumed and its producer would otherwise block forever; drain it
+							// in the background.
+							delete(subs[sub.channel], sub)
+							go drainReplayedEvents(batchCh)
+						}
 					}
 				}
 			}
 		case <-srv.quit:
+			// We are about to stop processing unsubscriptions, so first handle any that are
+			// already queued: their handlers have exited, and a handler that swept its event
+			// channel before the replay batch was enqueued is relying on this path to drain it.
+			// Subscriptions handled here are deliberately not removed from the map -- the loop
+			// below revisits them, but with batch already nil and close() being idempotent
+			// that revisit is a no-op.
+		DrainUnsubs:
+			for {
+				select {
+				case sub := <-srv.unsubs:
+					if sub.batch != nil {
+						go drainReplayedEvents(sub.batch)
+						sub.batch = nil
+					}
+				default:
+					break DrainUnsubs
+				}
+			}
 			for _, sub := range subs {
 				for s := range sub {
 					s.close()
+					// If the subscriber is already gone, its handler can no longer be relied on
+					// to consume or drain a batch, and its unsubscription may never be seen
+					// (we are exiting); drain the batch here. If the subscriber is still
+					// connected, we must NOT drain: its handler keeps delivering the buffered
+					// batch to the client even after close(s.out), and draining would steal
+					// events from that delivery.
+					if s.batch != nil && s.ctx.Err() != nil {
+						go drainReplayedEvents(s.batch)
+						s.batch = nil
+					}
 				}
 			}
 			return

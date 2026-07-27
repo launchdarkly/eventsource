@@ -493,6 +493,229 @@ func TestReplayMultipleConcurrentSubscriptionsUnblock(t *testing.T) {
 	}
 }
 
+// TestReplayProducerUnblocksOnImmediateDisconnectPlainRepository verifies that a plain Repository
+// producer is unblocked even when the subscriber disconnects immediately, before reading any of the
+// stream -- i.e. before the handler has dequeued the replay batch from its buffered event channel.
+// This exercises a different window than the tests above, which all wait for "data: first" (and
+// therefore guarantee the handler is already consuming the batch) before disconnecting. Because the
+// disconnect races the handler's dequeue, a single trial can land on either side of the window, so
+// the test runs many trials and requires every producer to finish; on code without the
+// unsubscribe-path drain, most trials strand the producer.
+func TestReplayProducerUnblocksOnImmediateDisconnectPlainRepository(t *testing.T) {
+	const trials = 20
+	for i := 0; i < trials; i++ {
+		func() {
+			channel := "test"
+			server := NewServer()
+			server.ReplayAll = true
+			defer server.Close()
+			repo := newPlainReplayRepo()
+			server.Register(channel, repo)
+			httpServer := httptest.NewServer(server.Handler(channel))
+			defer httpServer.Close()
+
+			conn := rawSSEConn(t, httpServer.URL)
+			// Wait only until the producer is running (which happens as the subscription is
+			// registered), NOT until any event has been received, then disconnect at once --
+			// alternating between an abrupt RST and a clean FIN.
+			<-repo.started
+			if i%2 == 0 {
+				require.NoError(t, conn.SetLinger(0))
+			}
+			require.NoError(t, conn.Close())
+			close(repo.release)
+
+			assertClosedWithin(t, repo.finished,
+				fmt.Sprintf("producer goroutine exit (trial %d)", i))
+		}()
+	}
+}
+
+// slowReplayRepo delays returning from Replay. This lets a test arrange for the subscriber's
+// handler to have exited (and swept its still-empty event channel) before the batch is ever
+// enqueued, so that only the Server's unsubscription and shutdown paths can dispose of the batch.
+type slowReplayRepo struct {
+	started  chan struct{}
+	finished chan struct{}
+	delay    time.Duration
+}
+
+func newSlowReplayRepo(delay time.Duration) *slowReplayRepo {
+	return &slowReplayRepo{
+		started:  make(chan struct{}),
+		finished: make(chan struct{}),
+		delay:    delay,
+	}
+}
+
+func (r *slowReplayRepo) Replay(channel, id string) chan Event {
+	close(r.started)
+	time.Sleep(r.delay)
+	out := make(chan Event)
+	go func() {
+		defer close(r.finished)
+		defer close(out)
+		for i := 0; i < 50; i++ {
+			out <- &publication{id: strconv.Itoa(i), data: "replayed"}
+		}
+	}()
+	return out
+}
+
+// TestReplayProducerUnblocksWhenServerClosesDuringImmediateDisconnect verifies that a producer is
+// not stranded when Server.Close races a subscriber that disconnected before its replay batch was
+// even produced. In that ordering the handler has already exited (its exit-time sweep found
+// nothing, because the batch had not been enqueued yet), so the batch can only be disposed of by
+// the Server -- and the Server may select the quit case over the handler's queued unsubscription,
+// so the shutdown path itself must drain it. Whether quit or the unsubscription is selected first
+// is a coin flip per trial, so the test runs many trials and requires every producer to finish.
+func TestReplayProducerUnblocksWhenServerClosesDuringImmediateDisconnect(t *testing.T) {
+	const trials = 20
+	for i := 0; i < trials; i++ {
+		func() {
+			channel := "test"
+			server := NewServer()
+			server.ReplayAll = true
+			repo := newSlowReplayRepo(80 * time.Millisecond)
+			server.Register(channel, repo)
+			httpServer := httptest.NewServer(server.Handler(channel))
+			defer httpServer.Close()
+
+			conn := rawSSEConn(t, httpServer.URL)
+			// Replay is now sleeping inside the Server's goroutine. Disconnect and give the
+			// handler time to observe it, exit, and queue its unsubscription -- all before
+			// Replay returns and the batch is enqueued.
+			<-repo.started
+			require.NoError(t, conn.SetLinger(0))
+			require.NoError(t, conn.Close())
+			time.Sleep(40 * time.Millisecond)
+			// Close the server; the quit signal and the queued unsubscription are now both
+			// ready when the Server finishes the registration it is still processing.
+			server.Close()
+
+			assertClosedWithin(t, repo.finished,
+				fmt.Sprintf("producer goroutine exit (trial %d)", i))
+		}()
+	}
+}
+
+// TestReplayServerCloseDrainsBatchOfDepartedSubscriber pins the narrowest shutdown window
+// directly: a subscriber whose context is already cancelled (the client is gone) and whose
+// handler will never act again -- it has already swept its then-empty event channel, and its
+// unsubscription will never be processed. It builds that state explicitly, registering a
+// subscription with a cancelled context and no handler behind it, so the only thing that can
+// dispose of the replay batch is the shutdown path's drain of departed subscribers still in the
+// subscription map. This is a white-box test by necessity; from outside the process the window
+// between a handler's sweep and its unsubscription send is microseconds wide.
+func TestReplayServerCloseDrainsBatchOfDepartedSubscriber(t *testing.T) {
+	channel := "test"
+	server := NewServer()
+	server.ReplayAll = true
+	repo := newPlainReplayRepo()
+	server.Register(channel, repo)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the subscriber is already gone
+	eventCh := make(chan eventOrComment, server.BufferSize)
+	sub := &subscription{
+		channel: channel,
+		out:     eventCh,
+		ctx:     ctx,
+	}
+	server.subs <- sub // registration enqueues the batch; no handler will ever consume it
+	<-repo.started
+	close(repo.release)
+
+	server.Close()
+	assertClosedWithin(t, repo.finished, "producer goroutine exit")
+}
+
+// pacedReplayRepo produces a fixed series of events with small gaps between them, so a test can
+// reliably interleave another action (such as Server.Close) with an in-progress delivery.
+type pacedReplayRepo struct {
+	started  chan struct{}
+	finished chan struct{}
+}
+
+func newPacedReplayRepo() *pacedReplayRepo {
+	return &pacedReplayRepo{started: make(chan struct{}), finished: make(chan struct{})}
+}
+
+func (r *pacedReplayRepo) Replay(channel, id string) chan Event {
+	out := make(chan Event)
+	go func() {
+		defer close(r.finished)
+		defer close(out)
+		close(r.started)
+		for i := 0; i < 30; i++ {
+			out <- &publication{id: strconv.Itoa(i), data: "replayed"}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	return out
+}
+
+// TestReplayCloseDoesNotTruncateDeliveryToConnectedSubscriber verifies that closing the server
+// while a still-connected subscriber is consuming a replay batch does not steal any of the
+// batch's events from that subscriber: the handler must be left to deliver every remaining
+// event, so the client's Last-Event-ID resume point stays accurate. This is the guard rail for
+// the shutdown path's decision NOT to drain the batch of a subscriber whose request context is
+// still live. The interleaving is racy, so the test repeats the scenario several times.
+func TestReplayCloseDoesNotTruncateDeliveryToConnectedSubscriber(t *testing.T) {
+	const trials = 8
+	for i := 0; i < trials; i++ {
+		func() {
+			channel := "test"
+			server := NewServer()
+			server.ReplayAll = true
+			repo := newPacedReplayRepo()
+			server.Register(channel, repo)
+			httpServer := httptest.NewServer(server.Handler(channel))
+			defer httpServer.Close()
+
+			resp, err := http.Get(httpServer.URL)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			<-repo.started
+
+			// Collect every id until the stream ends (the handler exits normally once the
+			// batch is done and its channel has been closed by the shutdown), closing the
+			// server as soon as the first event is seen so the shutdown lands mid-batch.
+			// Every one of the 30 events must reach the subscriber; a shutdown path that
+			// drained this batch would swallow a subset of them.
+			rd := newSSEReader(t, resp.Body)
+			seen := make(map[string]bool)
+			closed := false
+			deadline := time.After(replayTestDeadline)
+		Collect:
+			for {
+				select {
+				case line, ok := <-rd.lines:
+					if !ok {
+						break Collect
+					}
+					if strings.HasPrefix(line, "id: ") {
+						seen[strings.TrimSpace(strings.TrimPrefix(line, "id: "))] = true
+					}
+					if !closed && strings.Contains(line, "data: replayed") {
+						server.Close() // close mid-batch, subscriber still connected
+						closed = true
+					}
+				case <-deadline:
+					t.Fatalf("timed out waiting for the stream to end (trial %d)", i)
+				}
+			}
+			require.True(t, closed, "stream ended before delivering any event (trial %d)", i)
+			for id := 0; id < 30; id++ {
+				assert.True(t, seen[strconv.Itoa(id)],
+					"event %d was not delivered to the connected subscriber (trial %d)", id, i)
+			}
+			assertClosedWithin(t, repo.finished,
+				fmt.Sprintf("producer goroutine exit (trial %d)", i))
+		}()
+	}
+}
+
 // TestReplayProducerUnblocksWhenServerCloses verifies that closing the server does not strand a
 // Repository producer that is mid-replay.
 func TestReplayProducerUnblocksWhenServerCloses(t *testing.T) {
