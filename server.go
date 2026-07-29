@@ -107,6 +107,25 @@ func (srv *Server) Close() {
 	srv.markServerClosed()
 }
 
+// writeStreamHeaders writes the standard SSE response headers, negotiating gzip compression if the
+// server allows it and the client accepts it, then commits them with a 200 status. It returns
+// whether the response body must be gzip-encoded.
+func (srv *Server) writeStreamHeaders(w http.ResponseWriter, req *http.Request) bool {
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream; charset=utf-8")
+	h.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	h.Set("Connection", "keep-alive")
+	if srv.AllowCORS {
+		h.Set("Access-Control-Allow-Origin", "*")
+	}
+	useGzip := srv.Gzip && strings.Contains(req.Header.Get("Accept-Encoding"), "gzip")
+	if useGzip {
+		h.Set("Content-Encoding", "gzip")
+	}
+	w.WriteHeader(http.StatusOK)
+	return useGzip
+}
+
 // Handler creates a new HTTP handler for serving a specified channel.
 //
 // The channel does not have to have been previously registered with Register, but if it has been, the
@@ -114,18 +133,7 @@ func (srv *Server) Close() {
 // and the Last-Event-Id header of the request.
 func (srv *Server) Handler(channel string) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
-		h := w.Header()
-		h.Set("Content-Type", "text/event-stream; charset=utf-8")
-		h.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		h.Set("Connection", "keep-alive")
-		if srv.AllowCORS {
-			h.Set("Access-Control-Allow-Origin", "*")
-		}
-		useGzip := srv.Gzip && strings.Contains(req.Header.Get("Accept-Encoding"), "gzip")
-		if useGzip {
-			h.Set("Content-Encoding", "gzip")
-		}
-		w.WriteHeader(http.StatusOK)
+		useGzip := srv.writeStreamHeaders(w, req)
 
 		// If the Handler is still active even though the server is closed, stop here.
 		// Otherwise the Handler will block while publishing to srv.subs indefinitely.
@@ -417,6 +425,17 @@ func (srv *Server) PublishComment(channels []string, text string) {
 	}
 }
 
+// replay obtains the replay channel for a new subscription. If the repository supports it, the
+// subscriber's context is passed so the repository's producer can stop sending promptly when the
+// subscriber disconnects. Otherwise this falls back to the original context-less Replay; the
+// handler's background drain (see Handler) still ensures such a producer eventually unblocks.
+func replay(repo Repository, sub *subscription) <-chan Event {
+	if repoCtx, ok := repo.(RepositoryWithContext); ok {
+		return repoCtx.ReplayWithContext(sub.ctx, sub.channel, sub.lastEventID)
+	}
+	return repo.Replay(sub.channel, sub.lastEventID)
+}
+
 func (srv *Server) run() {
 	defer close(srv.stopped)
 	// All access to the subs and repos maps is done from the same goroutine, so modifications are safe.
@@ -481,16 +500,7 @@ func (srv *Server) run() {
 			if srv.ReplayAll || len(sub.lastEventID) > 0 {
 				repo, ok := repos[sub.channel]
 				if ok {
-					// If the repository supports it, pass the subscriber's context so its producer can
-					// stop sending promptly when the subscriber disconnects. Otherwise fall back to the
-					// original context-less Replay; the handler's background drain (see Handler) still
-					// ensures such a producer eventually unblocks.
-					var batchCh <-chan Event
-					if repoCtx, ok := repo.(RepositoryWithContext); ok {
-						batchCh = repoCtx.ReplayWithContext(sub.ctx, sub.channel, sub.lastEventID)
-					} else {
-						batchCh = repo.Replay(sub.channel, sub.lastEventID)
-					}
+					batchCh := replay(repo, sub)
 					if batchCh != nil {
 						if sub.send(eventBatch{events: batchCh}) {
 							// Remember the batch so that if the subscriber goes away before its

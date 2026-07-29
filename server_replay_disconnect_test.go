@@ -30,17 +30,24 @@ const replayTestDeadline = 3 * time.Second
 // waits for the test to release it, then sends a series of events on an unbuffered channel. This
 // lets the test position the producer so that it becomes blocked on a channel send exactly when the
 // subscriber disconnects.
+//
+// firstDelivered is closed once the first (unbuffered) send completes, which proves the handler has
+// consumed it and is reading the batch. Tests synchronize on that rather than on the bytes reaching
+// the client: replayed events are flushed once per batch, so nothing is client-visible while the
+// producer is still holding the batch open.
 type plainReplayRepo struct {
-	started  chan struct{}
-	release  chan struct{}
-	finished chan struct{}
+	started        chan struct{}
+	firstDelivered chan struct{}
+	release        chan struct{}
+	finished       chan struct{}
 }
 
 func newPlainReplayRepo() *plainReplayRepo {
 	return &plainReplayRepo{
-		started:  make(chan struct{}),
-		release:  make(chan struct{}),
-		finished: make(chan struct{}),
+		started:        make(chan struct{}),
+		firstDelivered: make(chan struct{}),
+		release:        make(chan struct{}),
+		finished:       make(chan struct{}),
 	}
 }
 
@@ -51,6 +58,7 @@ func (r *plainReplayRepo) Replay(channel, id string) chan Event {
 		defer close(out)
 		close(r.started)
 		out <- &publication{id: "0", data: "first"}
+		close(r.firstDelivered)
 		<-r.release
 		for i := 1; i < 50; i++ {
 			out <- &publication{id: strconv.Itoa(i), data: "more"}
@@ -63,6 +71,7 @@ func (r *plainReplayRepo) Replay(channel, id string) chan Event {
 // and (for ReplayWithContext) whether it observed context cancellation.
 type ctxReplayRepo struct {
 	started         chan struct{}
+	firstDelivered  chan struct{}
 	release         chan struct{}
 	finished        chan struct{}
 	ctxObserved     chan struct{}
@@ -75,10 +84,11 @@ type ctxReplayRepo struct {
 
 func newCtxReplayRepo() *ctxReplayRepo {
 	return &ctxReplayRepo{
-		started:     make(chan struct{}),
-		release:     make(chan struct{}),
-		finished:    make(chan struct{}),
-		ctxObserved: make(chan struct{}),
+		started:        make(chan struct{}),
+		firstDelivered: make(chan struct{}),
+		release:        make(chan struct{}),
+		finished:       make(chan struct{}),
+		ctxObserved:    make(chan struct{}),
 	}
 }
 
@@ -101,6 +111,7 @@ func (r *ctxReplayRepo) ReplayWithContext(ctx context.Context, channel, id strin
 		close(r.started)
 		select {
 		case out <- &publication{id: "0", data: "first"}:
+			close(r.firstDelivered)
 		case <-ctx.Done():
 			close(r.ctxObserved)
 			return
@@ -218,9 +229,9 @@ func TestReplayProducerUnblocksOnCleanDisconnectPlainRepository(t *testing.T) {
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	<-repo.started
-
-	rd := newSSEReader(t, resp.Body)
-	rd.waitFor(t, "data: first")
+	_ = newSSEReader(t, resp.Body)
+	// The producer's first send completing means the handler is mid-batch.
+	<-repo.firstDelivered
 
 	cancel()
 	_ = resp.Body.Close()
@@ -244,8 +255,8 @@ func TestReplayProducerUnblocksOnAbruptResetPlainRepository(t *testing.T) {
 
 	conn := rawSSEConn(t, httpServer.URL)
 	<-repo.started
-	rd := newSSEReader(t, conn)
-	rd.waitFor(t, "data: first")
+	_ = newSSEReader(t, conn)
+	<-repo.firstDelivered
 
 	// Force an abrupt RST instead of a clean FIN.
 	require.NoError(t, conn.SetLinger(0))
@@ -274,9 +285,8 @@ func TestReplayWithContextObservesCancellationOnDisconnect(t *testing.T) {
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	<-repo.started
-
-	rd := newSSEReader(t, resp.Body)
-	rd.waitFor(t, "data: first")
+	_ = newSSEReader(t, resp.Body)
+	<-repo.firstDelivered
 
 	cancel()
 	_ = resp.Body.Close()
@@ -306,9 +316,8 @@ func TestReplayWithContextProducerUnblocksWhenBlockedOnSend(t *testing.T) {
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	<-repo.started
-
-	rd := newSSEReader(t, resp.Body)
-	rd.waitFor(t, "data: first")
+	_ = newSSEReader(t, resp.Body)
+	<-repo.firstDelivered
 
 	cancel()
 	_ = resp.Body.Close()
@@ -334,8 +343,8 @@ func TestReplayWithContextIsPreferredOverReplay(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	<-repo.started
-	rd := newSSEReader(t, resp.Body)
-	rd.waitFor(t, "data: first")
+	_ = newSSEReader(t, resp.Body)
+	<-repo.firstDelivered
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&repo.replayCtxCalled))
 	assert.Equal(t, int32(0), atomic.LoadInt32(&repo.replayCalled))
@@ -359,9 +368,11 @@ func TestReplayNormalDeliveryPlainRepository(t *testing.T) {
 	<-repo.started
 
 	rd := newSSEReader(t, resp.Body)
-	rd.waitFor(t, "data: first")
+	// The batch is flushed to the client when it completes, so release the producer
+	// first, then confirm the full ordered delivery.
+	<-repo.firstDelivered
 	close(repo.release)
-	// Events 1..49 should all arrive; confirm the last one.
+	rd.waitFor(t, "data: first")
 	rd.waitFor(t, "id: 49")
 	assertClosedWithin(t, repo.finished, "producer goroutine exit")
 }
@@ -384,8 +395,9 @@ func TestReplayNormalDeliveryContextRepository(t *testing.T) {
 	<-repo.started
 
 	rd := newSSEReader(t, resp.Body)
-	rd.waitFor(t, "data: first")
+	<-repo.firstDelivered
 	close(repo.release)
+	rd.waitFor(t, "data: first")
 	rd.waitFor(t, "id: 49")
 	assertClosedWithin(t, repo.finished, "producer goroutine exit")
 }
@@ -478,8 +490,8 @@ func TestReplayMultipleConcurrentSubscriptionsUnblock(t *testing.T) {
 			resp, err := http.DefaultClient.Do(req)
 			require.NoError(t, err)
 			<-repos[i].started
-			rd := newSSEReader(t, resp.Body)
-			rd.waitFor(t, "data: first")
+			_ = newSSEReader(t, resp.Body)
+			<-repos[i].firstDelivered
 			cancel()
 			_ = resp.Body.Close()
 			time.Sleep(50 * time.Millisecond)
@@ -730,8 +742,8 @@ func TestReplayProducerUnblocksWhenServerCloses(t *testing.T) {
 	resp, err := http.Get(httpServer.URL)
 	require.NoError(t, err)
 	<-repo.started
-	rd := newSSEReader(t, resp.Body)
-	rd.waitFor(t, "data: first")
+	_ = newSSEReader(t, resp.Body)
+	<-repo.firstDelivered
 
 	// Release the producer so it is actively delivering, then close the server and the client.
 	close(repo.release)
@@ -753,7 +765,6 @@ func TestLateHandlerExitsDoNotBlockAfterServerClose(t *testing.T) {
 
 	repos := make([]*plainReplayRepo, n)
 	conns := make([]*net.TCPConn, n)
-	readers := make([]*sseReader, n)
 	for i := 0; i < n; i++ {
 		channel := "chan-" + strconv.Itoa(i)
 		repos[i] = newPlainReplayRepo()
@@ -767,8 +778,8 @@ func TestLateHandlerExitsDoNotBlockAfterServerClose(t *testing.T) {
 	for i := 0; i < n; i++ {
 		conns[i] = rawSSEConn(t, httpServer.URL+"/chan-"+strconv.Itoa(i))
 		<-repos[i].started
-		readers[i] = newSSEReader(t, conns[i])
-		readers[i].waitFor(t, "data: first")
+		_ = newSSEReader(t, conns[i])
+		<-repos[i].firstDelivered
 	}
 
 	server.Close()
