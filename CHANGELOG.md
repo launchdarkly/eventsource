@@ -2,6 +2,14 @@
 
 All notable changes to the project will be documented in this file. This project adheres to [Semantic Versioning](http://semver.org).
 
+## [1.11.2](https://github.com/launchdarkly/eventsource/compare/v1.11.1...v1.11.2) (2026-07-29)
+
+
+### Bug Fixes
+
+* Flush once per replayed batch instead of once per event ([#64](https://github.com/launchdarkly/eventsource/issues/64)) ([e505af0](https://github.com/launchdarkly/eventsource/commit/e505af0f370d0840729c9df8a17e6d032b328f9d))
+* unblock Repository producers when a subscriber disconnects mid-replay ([#63](https://github.com/launchdarkly/eventsource/issues/63)) ([1146284](https://github.com/launchdarkly/eventsource/commit/11462841d97198e390de7025d893881afecfd717))
+
 ## [1.11.1](https://github.com/launchdarkly/eventsource/compare/v1.11.0...v1.11.1) (2026-07-22)
 
 
