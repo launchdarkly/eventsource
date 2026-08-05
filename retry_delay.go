@@ -7,42 +7,57 @@ import (
 	"time"
 )
 
-// Encapsulation of configurable backoff/jitter behavior.
+// Encapsulation of the streaming retry-timing behavior. Supports one or more
+// RetryCurves registered on a stream at subscribe time, with a single
+// currently-active curve driving delay computation. See retry_curve.go for the
+// user-facing type; this file holds the internal machinery.
 //
-// - The system can either be in a "good" state or a "bad" state. The initial state is "bad"; the
-// caller is responsible for indicating when it transitions to "good". When we ask for a new retry
-// delay, that implies the state is now transitioning to "bad".
+// The library uses lazy resolution at delay-computation time, using the active curve's spec,
+// falling through to the effective default's spec and then to hard-coded
+// fallbacks.
 //
-// - There is a configurable base delay, which can be changed at any time (if the SSE server sends
-// us a "retry:" directive).
+// Per-curve runtime state carries only two things: `retryCount` (the backoff
+// formula counter n, per RETRY spec) and a nullable `baseDelayOverride` that
+// captures server-directed `retry:` hints.
 //
-// - There are optional strategies for applying backoff and jitter to the delay.
-//
-// This object is meant to be used from a single goroutine once it's been created; its methods are
-// not safe for concurrent use.
+// `baseDelayOverride` is NOT cleared on healthy-op reset — it persists until the
+// server sends another `retry:` hint or the Stream is closed, matching the HTML5
+// SSE spec's "reconnection time is set until updated" semantic.
 type retryDelayStrategy struct {
-	baseDelay     time.Duration
-	backoff       backoffStrategy
-	jitter        jitterStrategy
-	resetInterval time.Duration
-	retryCount    int
-	goodSince     time.Time // nonzero only if the state is currently "good"
-	lock          sync.Mutex
+	curves           map[*RetryCurve]*perCurveState
+	effectiveDefault *RetryCurve
+	active           *RetryCurve
+	resetInterval    time.Duration
+	goodSince        time.Time // nonzero only if the state is currently "good"
+	backoff          backoffStrategy
+	jitter           jitterStrategy
+	lock             sync.Mutex
 }
 
-// Abstraction for backoff delay behavior.
+// perCurveState carries the per-stream mutable runtime state for one registered
+// curve: its backoff-formula counter and any server-directed base-delay override.
+// The curve's own spec fields (baseDelay/maxDelay/jitter) live on the *RetryCurve
+// key itself and are read only.
+type perCurveState struct {
+	retryCount        int
+	baseDelayOverride *time.Duration
+}
+
+// Abstraction for backoff delay behavior. The per-attempt effective maxDelay is
+// passed in per call so a single strategy instance can serve multiple retry curves
+// with different ceilings.
 type backoffStrategy interface {
-	applyBackoff(baseDelay time.Duration, retryCount int) time.Duration
+	applyBackoff(baseDelay time.Duration, retryCount int, maxDelay time.Duration) time.Duration
 }
 
-// Abstraction for delay jitter behavior.
+// Abstraction for delay jitter behavior. The per-attempt effective ratio is passed
+// in per call so a single strategy instance can serve multiple retry curves with
+// different jitter ratios.
 type jitterStrategy interface {
-	applyJitter(computedDelay time.Duration) time.Duration
+	applyJitter(computedDelay time.Duration, ratio float64) time.Duration
 }
 
-type defaultBackoffStrategy struct {
-	maxDelay time.Duration
-}
+type defaultBackoffStrategy struct{}
 
 // Creates the default implementation of exponential backoff, which doubles the delay each time up to
 // the specified maximum.
@@ -50,74 +65,163 @@ type defaultBackoffStrategy struct {
 // If a resetInterval was specified for the retryDelayStrategy, and the system has been in a "good"
 // state for at least that long, the delay is reset back to the base. This avoids perpetually increasing
 // delays in a situation where failures are rare).
-func newDefaultBackoff(maxDelay time.Duration) backoffStrategy {
-	return defaultBackoffStrategy{maxDelay}
+func newDefaultBackoff() backoffStrategy {
+	return defaultBackoffStrategy{}
 }
 
-func (s defaultBackoffStrategy) applyBackoff(baseDelay time.Duration, retryCount int) time.Duration {
-	d := math.Min(float64(baseDelay)*math.Pow(2, float64(retryCount)), float64(s.maxDelay))
+func (s defaultBackoffStrategy) applyBackoff(baseDelay time.Duration, retryCount int, maxDelay time.Duration) time.Duration {
+	d := math.Min(float64(baseDelay)*math.Pow(2, float64(retryCount)), float64(maxDelay))
 	return time.Duration(d)
 }
 
 type defaultJitterStrategy struct {
-	ratio  float64
 	random *rand.Rand
 }
 
 // Creates the default implementation of jitter, which subtracts a pseudo-random amount from each delay.
-// The ratio parameter should be greater than 0 and less than or equal to 1.0.
-func newDefaultJitter(ratio float64, randSeed int64) jitterStrategy {
+func newDefaultJitter(randSeed int64) jitterStrategy {
 	if randSeed <= 0 {
 		randSeed = time.Now().UnixNano()
 	}
+	//nolint:gosec // This isn't a cryptographic use-case, weak RNG is acceptable
+	return &defaultJitterStrategy{random: rand.New(rand.NewSource(randSeed))}
+}
+
+func (s *defaultJitterStrategy) applyJitter(computedDelay time.Duration, ratio float64) time.Duration {
 	if ratio > 1.0 {
 		ratio = 1.0
 	}
-	//nolint:gosec // This isn't a cryptographic use-case, weak RNG is acceptable
-	return &defaultJitterStrategy{ratio, rand.New(rand.NewSource(randSeed))}
-}
-
-func (s *defaultJitterStrategy) applyJitter(computedDelay time.Duration) time.Duration {
-	// retryCount doesn't matter here - it's included in the int
-	jitter := time.Duration(s.random.Int63n(int64(float64(computedDelay) * s.ratio)))
+	jitter := time.Duration(s.random.Int63n(int64(float64(computedDelay) * ratio)))
 	return computedDelay - jitter
 }
 
-// Creates a retryDelayStrategy.
-func newRetryDelayStrategy(
-	baseDelay time.Duration,
-	resetInterval time.Duration,
-	backoff backoffStrategy,
-	jitter jitterStrategy,
-) *retryDelayStrategy {
+// newRetryDelayStrategyFromOptions constructs a retryDelayStrategy from resolved
+// streamOptions.
+func newRetryDelayStrategyFromOptions(opts *streamOptions, randSeed int64) *retryDelayStrategy {
+	// Resolve the effective default curve.
+	effectiveDefault := opts.defaultRetryCurve
+	if effectiveDefault == nil {
+		// Synthesize from legacy stream options.
+		synth := &RetryCurve{}
+		if opts.initialRetry > 0 {
+			v := opts.initialRetry
+			synth.baseDelay = &v
+		}
+		if opts.backoffMaxDelay > 0 {
+			v := opts.backoffMaxDelay
+			synth.maxDelay = &v
+		}
+		if opts.jitterRatio > 0 {
+			v := opts.jitterRatio
+			synth.jitter = &v
+		}
+		effectiveDefault = synth
+	}
+
+	// Build the per-curve runtime state map: effective default + any additional
+	// registered curves.
+	curves := map[*RetryCurve]*perCurveState{
+		effectiveDefault: {},
+	}
+	for _, c := range opts.registeredRetryCurves {
+		if c == nil || c == effectiveDefault {
+			continue
+		}
+		if _, dup := curves[c]; dup {
+			continue
+		}
+		curves[c] = &perCurveState{}
+	}
+
+	// Stream-level reset interval falls back to the library default.
+	resetInterval := opts.retryResetInterval
+	if resetInterval <= 0 {
+		resetInterval = DefaultRetryResetInterval
+	}
+
 	return &retryDelayStrategy{
-		baseDelay:     baseDelay,
-		resetInterval: resetInterval,
-		backoff:       backoff,
-		jitter:        jitter,
+		curves:           curves,
+		effectiveDefault: effectiveDefault,
+		active:           effectiveDefault,
+		resetInterval:    resetInterval,
+		backoff:          newDefaultBackoff(),
+		jitter:           newDefaultJitter(randSeed),
 	}
 }
 
-// NextRetryDelay computes the next retry interval. This also sets the current state to "bad".
+// firstNonNil walks the two curve layers (primary then secondary) and returns the
+// value of the first whose selected field is non-nil. Falls back to `fallback` if
+// neither has the field set (or is itself nil).
+func firstNonNil[T any](selector func(*RetryCurve) *T, primary, secondary *RetryCurve, fallback T) T {
+	if primary != nil {
+		if v := selector(primary); v != nil {
+			return *v
+		}
+	}
+	if secondary != nil {
+		if v := selector(secondary); v != nil {
+			return *v
+		}
+	}
+	return fallback
+}
+
+// resolveCurveProperties computes the effective (baseDelay, maxDelay, jitter) for the given
+// curve handle by walking the overlay stack: curve.spec → effectiveDefault.spec →
+// hard-coded fallbacks.
 //
-// Note that currentTime is passed as a parameter instead of computed by this function to guarantee predictable
-// behavior in tests.
+// Caller must hold r.lock.
+func (r *retryDelayStrategy) resolveCurveProperties(c *RetryCurve) (baseDelay, maxDelay time.Duration, jitter float64) {
+	baseDelay = firstNonNil(func(c *RetryCurve) *time.Duration { return c.baseDelay }, c, r.effectiveDefault, DefaultInitialRetry)
+	maxDelay = firstNonNil(func(c *RetryCurve) *time.Duration { return c.maxDelay }, c, r.effectiveDefault, time.Duration(0))
+	jitter = firstNonNil(func(c *RetryCurve) *float64 { return c.jitter }, c, r.effectiveDefault, float64(0))
+	return
+}
+
+// NextRetryDelay computes the next retry interval and marks the current state as "bad".
+//
+// Order of operations:
+//  1. Check the healthy-operation reset condition (goodSince non-zero AND elapsed >=
+//     resetInterval). If satisfied, apply reset: for each curve set retryCount = 0
+//     (do NOT touch baseDelayOverride — persistent per SSE spec);
+//     active = effective default.
+//  2. Clear goodSince
+//  3. Resolve the active curve's effective properties; baseDelayOverride, if set, wins.
+//  4. Compute delay = min(effectiveBase * 2^retryCount, effectiveMax) with jitter.
+//  5. Increment active.retryCount.
+//
+// currentTime is passed as a parameter rather than computed internally to keep tests
+// deterministic.
 func (r *retryDelayStrategy) NextRetryDelay(currentTime time.Time) time.Duration {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
 	if !r.goodSince.IsZero() && r.resetInterval > 0 && (currentTime.Sub(r.goodSince) >= r.resetInterval) {
-		r.retryCount = 0
+		for _, c := range r.curves {
+			c.retryCount = 0
+			// baseDelayOverride is NOT cleared intentionally
+		}
+		r.active = r.effectiveDefault
 	}
 	r.goodSince = time.Time{}
-	delay := r.baseDelay
-	if r.backoff != nil {
-		delay = r.backoff.applyBackoff(delay, r.retryCount)
+
+	activeState := r.curves[r.active]
+
+	effectiveBase, effectiveMax, effectiveJitter := r.resolveCurveProperties(r.active)
+	if activeState.baseDelayOverride != nil {
+		effectiveBase = *activeState.baseDelayOverride
 	}
-	r.retryCount++
-	if r.jitter != nil {
-		delay = r.jitter.applyJitter(delay)
+
+	delay := effectiveBase
+	if effectiveMax > 0 {
+		delay = r.backoff.applyBackoff(effectiveBase, activeState.retryCount, effectiveMax)
 	}
+	if effectiveJitter > 0 {
+		delay = r.jitter.applyJitter(delay, effectiveJitter)
+	}
+
+	activeState.retryCount++
+
 	return delay
 }
 
@@ -128,19 +232,57 @@ func (r *retryDelayStrategy) SetGoodSince(goodSince time.Time) {
 	r.lock.Unlock()
 }
 
-// SetBaseDelay changes the initial retry delay and resets the backoff (if any) so the next retry will use
-// that value.
-//
-// This is used to implement the optional SSE behavior where the server sends a "retry:" command to
-// set the base retry to a specific value. Note that we will still apply a jitter, if jitter is enabled,
-// and subsequent retries will still increase exponentially.
-func (r *retryDelayStrategy) SetBaseDelay(baseDelay time.Duration) {
+// ApplyRetryTime records a server-directed reconnection-time hint received via the
+// SSE `retry:` field. It sets every registered curve's baseDelayOverride to the
+// given duration and zeroes every curve's retryCount (the backoff-formula counter),
+// so the immediate next attempt in whatever regime is active uses the hinted value.
+// The active curve is NOT changed.
+func (r *retryDelayStrategy) ApplyRetryTime(hint time.Duration) {
 	r.lock.Lock()
-	r.baseDelay = baseDelay
-	r.retryCount = 0
-	r.lock.Unlock()
+	defer r.lock.Unlock()
+	for _, c := range r.curves {
+		v := hint
+		c.baseDelayOverride = &v
+		c.retryCount = 0
+	}
+}
+
+// activateCurve switches the currently-active curve immediately. Silent no-op if
+// the curve is nil, unregistered, or already active.
+//
+// Does NOT reset the newly-activated curve's retryCount — each curve's counter
+// retains its progression across activations. Does NOT touch any curve's
+// baseDelayOverride.
+//
+// If a healthy-operation reset fires on the next NextRetryDelay call, that reset
+// trumps this activation: active will be reverted to the effective default.
+func (r *retryDelayStrategy) activateCurve(c *RetryCurve) {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+	if c == nil {
+		return
+	}
+	if c == DefaultCurve {
+		r.active = r.effectiveDefault
+		return
+	}
+	if _, ok := r.curves[c]; !ok {
+		return
+	}
+	r.active = c
+}
+
+// activeCurve returns the currently-active *RetryCurve — a real curve pointer
+// registered on this stream, never the DefaultCurve sentinel.
+func (r *retryDelayStrategy) activeCurve() *RetryCurve {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+	return r.active
 }
 
 func (r *retryDelayStrategy) hasJitter() bool { //nolint:unused // used only in tests
-	return r.jitter != nil
+	r.lock.Lock()
+	defer r.lock.Unlock()
+	_, _, j := r.resolveCurveProperties(r.active)
+	return j > 0
 }

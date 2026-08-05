@@ -161,20 +161,7 @@ func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOpti
 }
 
 func newStream(request *http.Request, configuredOptions streamOptions) *Stream {
-	var backoff backoffStrategy
-	var jitter jitterStrategy
-	if configuredOptions.backoffMaxDelay > 0 {
-		backoff = newDefaultBackoff(configuredOptions.backoffMaxDelay)
-	}
-	if configuredOptions.jitterRatio > 0 {
-		jitter = newDefaultJitter(configuredOptions.jitterRatio, 0)
-	}
-	retryDelay := newRetryDelayStrategy(
-		configuredOptions.initialRetry,
-		configuredOptions.retryResetInterval,
-		backoff,
-		jitter,
-	)
+	retryDelay := newRetryDelayStrategyFromOptions(&configuredOptions, 0)
 
 	stream := &Stream{
 		c:            configuredOptions.httpClient,
@@ -360,7 +347,7 @@ NewStream:
 			case ev := <-events:
 				pub := ev.(*publication)
 				if pub.Retry() > 0 {
-					stream.retryDelay.SetBaseDelay(time.Duration(pub.Retry()) * time.Millisecond)
+					stream.retryDelay.ApplyRetryTime(clampServerDirectedRetry(pub.Retry()))
 				}
 				stream.lastEventID = pub.lastEventID
 				stream.retryDelay.SetGoodSince(time.Now())
@@ -394,6 +381,25 @@ func (stream *Stream) getRetryDelayStrategy() *retryDelayStrategy { //nolint:unu
 	return stream.retryDelay
 }
 
+// ActivateCurve switches the currently-active retry curve on this stream. The
+// change takes effect immediately.
+//
+// The curve argument must be one of: (a) a curve registered on this stream via
+// StreamOptionRegisterRetryCurve, (b) the stream's effective default curve
+// (installed via StreamOptionDefaultRetryCurve, or otherwise synthesized), or
+// (c) the package-level DefaultCurve sentinel — treated as a symbolic marker
+// meaning "revert to the effective default." Any other *RetryCurve is a silent no-op.
+//
+// If a healthy-operation reset fires on the next NextRetryDelay call, that reset
+// trumps this activation: the active curve will be reverted to the effective
+// default. This preserves the intuitive property that a single failure after a long
+// healthy period does not push the stream into the newly-activated regime.
+//
+// Safe to call from any goroutine, including the stream's error handler.
+func (stream *Stream) ActivateCurve(curve *RetryCurve) {
+	stream.retryDelay.activateCurve(curve)
+}
+
 // SetLogger sets the Logger field in a thread-safe manner.
 func (stream *Stream) SetLogger(logger Logger) {
 	stream.mu.Lock()
@@ -405,4 +411,12 @@ func (stream *Stream) getLogger() Logger {
 	stream.mu.RLock()
 	defer stream.mu.RUnlock()
 	return stream.Logger
+}
+
+func clampServerDirectedRetry(hintMs int64) time.Duration {
+	maxMs := int64(MaxServerDirectedRetryDelay / time.Millisecond)
+	if hintMs > maxMs {
+		hintMs = maxMs
+	}
+	return time.Duration(hintMs) * time.Millisecond
 }

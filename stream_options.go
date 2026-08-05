@@ -7,17 +7,19 @@ import (
 )
 
 type streamOptions struct {
-	initialRetry        time.Duration
-	httpClient          *http.Client
-	lastEventID         string
-	logger              Logger
-	backoffMaxDelay     time.Duration
-	jitterRatio         float64
-	readTimeout         time.Duration
-	retryResetInterval  time.Duration
-	initialRetryTimeout time.Duration
-	errorHandler        StreamErrorHandler
-	queryParamsFunc     *func(existing url.Values) url.Values
+	initialRetry          time.Duration
+	httpClient            *http.Client
+	lastEventID           string
+	logger                Logger
+	backoffMaxDelay       time.Duration
+	jitterRatio           float64
+	readTimeout           time.Duration
+	retryResetInterval    time.Duration
+	initialRetryTimeout   time.Duration
+	errorHandler          StreamErrorHandler
+	queryParamsFunc       *func(existing url.Values) url.Values
+	defaultRetryCurve     *RetryCurve
+	registeredRetryCurves []*RetryCurve
 }
 
 // StreamOption is a common interface for optional configuration parameters that can be
@@ -227,6 +229,49 @@ func StreamOptionLogger(logger Logger) StreamOption {
 	return loggerOption{logger: logger}
 }
 
+type defaultRetryCurveOption struct {
+	curve *RetryCurve
+}
+
+func (o defaultRetryCurveOption) apply(s *streamOptions) error {
+	s.defaultRetryCurve = o.curve
+	return nil
+}
+
+// StreamOptionDefaultRetryCurve returns an option that installs the effective default
+// retry curve for the stream — the curve that is active at stream start and the
+// curve the stream reverts to after a healthy-operation reset.
+//
+// Every stream has an effective default at all times, so reset always has a valid
+// curve to revert to. If this option is not provided, the effective default is
+// synthesized from the legacy stream options (StreamOptionInitialRetry,
+// StreamOptionUseBackoff, StreamOptionUseJitter, StreamOptionRetryResetInterval) —
+// any properties that remain unset fall through to the library's hard-coded
+// fallbacks during delay-computation time.
+func StreamOptionDefaultRetryCurve(curve *RetryCurve) StreamOption {
+	return defaultRetryCurveOption{curve: curve}
+}
+
+type registerRetryCurveOption struct {
+	curve *RetryCurve
+}
+
+func (o registerRetryCurveOption) apply(s *streamOptions) error {
+	if o.curve != nil {
+		s.registeredRetryCurves = append(s.registeredRetryCurves, o.curve)
+	}
+	return nil
+}
+
+// StreamOptionRegisterRetryCurve returns an option that registers a curve on the
+// stream, making it eligible for runtime activation via Stream.ActivateCurve.
+// Unspecified properties on the curve inherit from the effective default curve.
+//
+// May be called multiple times to register more than one additional curve.
+func StreamOptionRegisterRetryCurve(curve *RetryCurve) StreamOption {
+	return registerRetryCurveOption{curve: curve}
+}
+
 type streamErrorHandlerOption struct {
 	handler StreamErrorHandler
 }
@@ -258,4 +303,8 @@ const (
 	DefaultInitialRetry = time.Second * 3
 	// DefaultRetryResetInterval is the default value for StreamOptionRetryResetInterval.
 	DefaultRetryResetInterval = time.Second * 60
+	// MaxServerDirectedRetryDelay is the upper bound applied to server-directed
+	// reconnection times received via the SSE `retry:` field, per RETRY spec
+	// Requirement 1.11.4. Values above this ceiling are treated as this ceiling.
+	MaxServerDirectedRetryDelay = time.Hour * 1
 )
