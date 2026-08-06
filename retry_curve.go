@@ -62,8 +62,8 @@ func (o retryCurveMaxDelayOption) apply(c *RetryCurve) error {
 // for a RetryCurve. A max delay of zero means "no backoff" — successive retries all
 // use the base delay. Without this option, max delay is inherited from the stream's
 // effective default at delay-computation time.
-func RetryCurveMaxDelay(max time.Duration) RetryCurveOption {
-	return retryCurveMaxDelayOption{v: max}
+func RetryCurveMaxDelay(maxDelay time.Duration) RetryCurveOption {
+	return retryCurveMaxDelayOption{v: maxDelay}
 }
 
 type retryCurveJitterOption struct{ v float64 }

@@ -69,7 +69,9 @@ func newDefaultBackoff() backoffStrategy {
 	return defaultBackoffStrategy{}
 }
 
-func (s defaultBackoffStrategy) applyBackoff(baseDelay time.Duration, retryCount int, maxDelay time.Duration) time.Duration {
+func (s defaultBackoffStrategy) applyBackoff(
+	baseDelay time.Duration, retryCount int, maxDelay time.Duration,
+) time.Duration {
 	d := math.Min(float64(baseDelay)*math.Pow(2, float64(retryCount)), float64(maxDelay))
 	return time.Duration(d)
 }
@@ -171,10 +173,21 @@ func firstNonNil[T any](selector func(*RetryCurve) *T, primary, secondary *Retry
 // hard-coded fallbacks.
 //
 // Caller must hold r.lock.
-func (r *retryDelayStrategy) resolveCurveProperties(c *RetryCurve) (baseDelay, maxDelay time.Duration, jitter float64) {
-	baseDelay = firstNonNil(func(c *RetryCurve) *time.Duration { return c.baseDelay }, c, r.effectiveDefault, DefaultInitialRetry)
-	maxDelay = firstNonNil(func(c *RetryCurve) *time.Duration { return c.maxDelay }, c, r.effectiveDefault, time.Duration(0))
-	jitter = firstNonNil(func(c *RetryCurve) *float64 { return c.jitter }, c, r.effectiveDefault, float64(0))
+func (r *retryDelayStrategy) resolveCurveProperties(
+	c *RetryCurve,
+) (baseDelay, maxDelay time.Duration, jitter float64) {
+	baseDelay = firstNonNil(
+		func(c *RetryCurve) *time.Duration { return c.baseDelay },
+		c, r.effectiveDefault, DefaultInitialRetry,
+	)
+	maxDelay = firstNonNil(
+		func(c *RetryCurve) *time.Duration { return c.maxDelay },
+		c, r.effectiveDefault, time.Duration(0),
+	)
+	jitter = firstNonNil(
+		func(c *RetryCurve) *float64 { return c.jitter },
+		c, r.effectiveDefault, float64(0),
+	)
 	return
 }
 
@@ -274,7 +287,7 @@ func (r *retryDelayStrategy) activateCurve(c *RetryCurve) {
 
 // activeCurve returns the currently-active *RetryCurve — a real curve pointer
 // registered on this stream, never the DefaultCurve sentinel.
-func (r *retryDelayStrategy) activeCurve() *RetryCurve {
+func (r *retryDelayStrategy) activeCurve() *RetryCurve { //nolint:unused // used only in tests
 	r.lock.Lock()
 	defer r.lock.Unlock()
 	return r.active
