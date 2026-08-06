@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,6 +21,7 @@ type subscription struct {
 	// event channel, the unsubscribe path can still drain it and unblock the Repository's
 	// producer. Accessed only from the Server.run() goroutine.
 	batch <-chan Event
+	id    uint64
 }
 
 type eventOrComment interface{}
@@ -51,12 +53,23 @@ type eventBatch struct {
 // Server manages any number of event-publishing channels and allows subscribers to consume them.
 // To use it within an HTTP server, create a handler for each channel with Handler().
 type Server struct {
-	AllowCORS       bool          // Enable all handlers to be accessible from any origin
-	ReplayAll       bool          // Replay repository even if there's no Last-Event-Id specified
-	BufferSize      int           // How many messages do we let the client get behind before disconnecting
-	Gzip            bool          // Enable compression if client can accept it
-	MaxConnTime     time.Duration // If non-zero, HTTP connections will be automatically closed after this time
-	Logger          Logger        // Logger is a logger that, when set, will be used for logging debug messages
+	AllowCORS   bool          // Enable all handlers to be accessible from any origin
+	ReplayAll   bool          // Replay repository even if there's no Last-Event-Id specified
+	BufferSize  int           // How many messages do we let the client get behind before disconnecting
+	Gzip        bool          // Enable compression if client can accept it
+	MaxConnTime time.Duration // If non-zero, HTTP connections will be automatically closed after this time
+	// Logger, when set, receives DEBUG lines for subscriber lifecycle events
+	// (add, remove, replay drain), a WARN line when a slow subscriber is
+	// dropped, and write errors. Lines identify connections by an opaque
+	// subscriber id and never include the channel name, because channel names
+	// may contain values (such as credentials) that must not appear in logs.
+	Logger Logger
+	// Trace, when set, receives callbacks at points in the Server's lifecycle. See
+	// ServerTrace for the concurrency contract that callbacks must satisfy.
+	//
+	// EXPERIMENTAL: this field and the ServerTrace API are subject to change or
+	// removal in any future release. See ServerTrace.
+	Trace           *ServerTrace
 	registrations   chan *registration
 	unregistrations chan *unregistration
 	pub             chan *outbound
@@ -70,6 +83,7 @@ type Server struct {
 	isClosed      bool
 	isClosedMutex sync.RWMutex
 	jitter        time.Duration
+	subCounter    atomic.Uint64
 }
 
 // NewServer creates a new Server instance.
