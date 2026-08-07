@@ -2,6 +2,13 @@
 
 All notable changes to the project will be documented in this file. This project adheres to [Semantic Versioning](http://semver.org).
 
+## [1.12.0](https://github.com/launchdarkly/eventsource/compare/v1.11.2...v1.12.0) (2026-08-07)
+
+
+### Features
+
+* Add ServerTrace instrumentation hooks to the SSE server ([#67](https://github.com/launchdarkly/eventsource/issues/67)) ([f4f9278](https://github.com/launchdarkly/eventsource/commit/f4f92786eb58b4a6aa913eb43673f4bb4348b385))
+
 ## [1.11.2](https://github.com/launchdarkly/eventsource/compare/v1.11.1...v1.11.2) (2026-07-29)
 
 
