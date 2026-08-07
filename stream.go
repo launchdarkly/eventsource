@@ -137,6 +137,9 @@ func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOpti
 		}
 		if configuredOptions.errorHandler != nil {
 			result := configuredOptions.errorHandler(err)
+			if result.ActivateCurve != nil {
+				stream.retryDelay.activateCurve(result.ActivateCurve)
+			}
 			if result.CloseNow {
 				return nil, err
 			}
@@ -269,6 +272,9 @@ func (stream *Stream) stream(r io.ReadCloser, h http.Header) {
 	reportErrorAndMaybeContinue := func(err error) bool {
 		if stream.errorHandler != nil {
 			result := stream.errorHandler(err)
+			if result.ActivateCurve != nil {
+				stream.retryDelay.activateCurve(result.ActivateCurve)
+			}
 			if result.CloseNow {
 				stream.Close()
 				return false
