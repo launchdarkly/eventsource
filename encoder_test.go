@@ -65,6 +65,16 @@ func TestEncoderComment(t *testing.T) {
 	assert.Equal(t, ":hello\n", string(buf.Bytes()))
 }
 
+func TestEncoderRejectsUnknownTypeWithoutRenderingValue(t *testing.T) {
+	buf := bytes.NewBuffer(nil)
+	err := NewEncoder(buf, false).Encode("do-not-disclose")
+	assert.Error(t, err)
+	// The error names the type only: its contents could be a payload, and the
+	// error flows to WriteError consumers and logs.
+	assert.NotContains(t, err.Error(), "do-not-disclose")
+	assert.Contains(t, err.Error(), "string")
+}
+
 func TestEncoderGzipCompression(t *testing.T) {
 	uncompressedBuf, compressedBuf, expectedCompressedBuf := bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil)
 

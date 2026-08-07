@@ -67,7 +67,8 @@ func (enc *Encoder) Encode(ec eventOrComment) error {
 			return fmt.Errorf("eventsource encode: %v", err)
 		}
 	default:
-		return fmt.Errorf("unexpected parameter to Encode: %v", ec)
+		// Logs the type (%T) and not the content, which may contain sensitive data.
+		return fmt.Errorf("unexpected parameter to Encode: %T", ec)
 	}
 	if enc.compressed {
 		return enc.w.(*gzip.Writer).Flush()

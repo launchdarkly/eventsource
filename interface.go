@@ -18,7 +18,9 @@ type Event interface {
 	Id() string
 	// The name of the event. Return empty string if not required.
 	Event() string
-	// The payload of the event.
+	// The payload of the event. Repeated calls must return the same value:
+	// the server may read it more than once, for example when accounting for
+	// payload sizes in addition to encoding.
 	Data() string
 }
 

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,6 +21,12 @@ type subscription struct {
 	// event channel, the unsubscribe path can still drain it and unblock the Repository's
 	// producer. Accessed only from the Server.run() goroutine.
 	batch <-chan Event
+	id    uint64
+	// closeReason records why the Server closed this subscription. It is written
+	// on the Server.run() goroutine before out is closed, and read by the handler
+	// only after it observes out being closed. That channel close is the
+	// happens-before edge that makes this plain field access race-free.
+	closeReason SubscriberRemovedReason
 }
 
 type eventOrComment interface{}
@@ -51,12 +58,23 @@ type eventBatch struct {
 // Server manages any number of event-publishing channels and allows subscribers to consume them.
 // To use it within an HTTP server, create a handler for each channel with Handler().
 type Server struct {
-	AllowCORS       bool          // Enable all handlers to be accessible from any origin
-	ReplayAll       bool          // Replay repository even if there's no Last-Event-Id specified
-	BufferSize      int           // How many messages do we let the client get behind before disconnecting
-	Gzip            bool          // Enable compression if client can accept it
-	MaxConnTime     time.Duration // If non-zero, HTTP connections will be automatically closed after this time
-	Logger          Logger        // Logger is a logger that, when set, will be used for logging debug messages
+	AllowCORS   bool          // Enable all handlers to be accessible from any origin
+	ReplayAll   bool          // Replay repository even if there's no Last-Event-Id specified
+	BufferSize  int           // How many messages do we let the client get behind before disconnecting
+	Gzip        bool          // Enable compression if client can accept it
+	MaxConnTime time.Duration // If non-zero, HTTP connections will be automatically closed after this time
+	// Logger, when set, receives DEBUG lines for subscriber lifecycle events
+	// (add, remove, replay drain), a WARN line when a slow subscriber is
+	// dropped, and write errors. Lines identify connections by an opaque
+	// subscriber id and never include the channel name, because channel names
+	// may contain values (such as credentials) that must not appear in logs.
+	Logger Logger
+	// Trace, when set, receives callbacks at points in the Server's lifecycle. See
+	// ServerTrace for the concurrency contract that callbacks must satisfy.
+	//
+	// EXPERIMENTAL: this field and the ServerTrace API are subject to change or
+	// removal in any future release. See ServerTrace.
+	Trace           *ServerTrace
 	registrations   chan *registration
 	unregistrations chan *unregistration
 	pub             chan *outbound
@@ -70,6 +88,7 @@ type Server struct {
 	isClosed      bool
 	isClosedMutex sync.RWMutex
 	jitter        time.Duration
+	subCounter    atomic.Uint64
 }
 
 // NewServer creates a new Server instance.
@@ -126,6 +145,169 @@ func (srv *Server) writeStreamHeaders(w http.ResponseWriter, req *http.Request) 
 	return useGzip
 }
 
+// handlerState carries the state one Handler invocation shares between its
+// read loop and its deferred teardown, so the teardown can live in methods
+// rather than closures. exitReason, closedNormally, readBatchCh, the replay
+// accounting, and delayedEvent are written by the read loop and read by the
+// teardown; every access is on the single handler goroutine.
+type handlerState struct {
+	srv       *Server
+	sub       *subscription
+	ctx       context.Context
+	channel   string
+	eventCh   chan eventOrComment
+	flusher   http.Flusher
+	enc       *Encoder
+	connStart time.Time
+
+	// exitReason is set at each point the read loop can exit, so that
+	// SubscriberRemoved can report why the connection ended. For a close
+	// initiated by the Server it is read from the subscription after the
+	// event channel is observed closed.
+	exitReason     SubscriberRemovedReason
+	closedNormally bool
+	reportedAdded  bool
+
+	readBatchCh <-chan Event
+	replayStart time.Time
+	replayCount int
+	replayBytes int64
+
+	// delayedEvent is an event parked by a jitter-enabled server until its
+	// delay elapses; the teardown accounts for one still parked when the
+	// connection ends.
+	delayedEvent eventOrComment
+}
+
+// unsubscribe tells the Server this handler is going away. After the Server has
+// shut down nothing consumes unsubs (and its small buffer may already be full),
+// so a handler that exits late must not block forever on the send.
+func (hs *handlerState) unsubscribe() {
+	select {
+	case hs.srv.unsubs <- hs.sub:
+	case <-hs.srv.stopped:
+	}
+}
+
+// reportExit is the exit-time reporting half of the teardown; it runs first
+// and holds the code that invokes consumer callbacks. A panic here must not
+// leak the subscription in the Server's map, strand a Repository producer, or
+// leave a SubscriberAdded without its matching SubscriberRemoved -- which is
+// why cleanup runs in a separate, earlier-registered defer.
+func (hs *handlerState) reportExit() {
+	replayAborted := false
+	batchToDrain := hs.readBatchCh
+	if hs.readBatchCh != nil {
+		replayAborted = true
+		if hs.exitReason != ReasonWriteError {
+			// A batch that fully drained before the connection ended -- only
+			// its end-of-batch sentinel went unobserved, because the disconnect
+			// and the batch end raced in the read loop's select -- is a
+			// completed drain, not an aborted one. A write error is the
+			// exception: the failing write is what ended the drain, so that
+			// batch is aborted no matter what the channel state says. (In the
+			// rare case that a Server shutdown's drain is concurrently consuming
+			// this abandoned batch, the probe can misread the drain's close as
+			// completion; Aborted is documented as best-effort for exactly this
+			// race.)
+			select {
+			case _, ok := <-hs.readBatchCh:
+				if !ok {
+					replayAborted = false
+					batchToDrain = nil // fully drained; nothing to hand over
+				}
+				// A received event was never written to the connection; it
+				// belongs to the abandoned batch and is discarded with it.
+			default:
+			}
+		}
+	}
+	// Producer liveness before consumer-reachable code: an abandoned replay
+	// batch is handed to its background drain before the flush and the
+	// callbacks below, so slow or panicking consumer code can neither delay
+	// nor strand a Repository producer.
+	if drainAbandonedBatches(batchToDrain, hs.eventCh) {
+		// The Server closed the subscription while the handler was already exiting
+		// for a reason of its own. The receive that observed the closed channel
+		// orders the read of closeReason -- the same happens-before edge as the
+		// closedNormally path -- and the reason the Server recorded is the
+		// authoritative one: without this, a subscriber dropped for buffer overflow
+		// while parked in a slow write would be reported as client_closed or
+		// max_conn_time.
+		hs.closedNormally = true
+	}
+	if hs.readBatchCh != nil && !replayAborted {
+		// The completed batch still gets its end-of-batch flush, matching the
+		// read loop's sentinel path and the DrainDuration contract.
+		hs.flusher.Flush()
+	}
+	if hs.delayedEvent != nil {
+		// An event was still parked awaiting its jitter delay when the
+		// connection ended. Report it so that every event a subscriber
+		// was sent is accounted for as either sent or discarded.
+		hs.srv.traceEventDiscarded(hs.ctx, hs.channel, DiscardReasonConnectionEnded)
+	}
+	if hs.readBatchCh != nil {
+		// A ReplayStarted with no batch-end sentinel observed still gets
+		// its matching ReplayFinished, so the drained-so-far totals are
+		// not lost.
+		hs.srv.traceReplayFinished(hs.ctx, hs.sub, hs.replayCount, hs.replayBytes,
+			sinceOrZero(hs.replayStart), replayAborted)
+	}
+}
+
+// cleanup is the half of the teardown that must never be skipped: resolving
+// the exit reason, unsubscribing, and reporting SubscriberRemoved. It is
+// registered before reportExit so that it runs last and still runs while a
+// panic from reportExit is unwinding. Unsubscribing a subscription the Server
+// never registered is a harmless no-op, so both defers safely precede the
+// registration send.
+func (hs *handlerState) cleanup() {
+	if hs.closedNormally {
+		// Reason precedence when a Server-initiated close races the handler's
+		// own exit: buffer_overflow outranks everything, because the
+		// SubscriberDropped callback that already fired promises a removal
+		// with the matching reason; a write error outranks the remaining
+		// Server reasons, because the handler has already reported that
+		// definitive local failure through WriteError; and any Server-recorded
+		// reason outranks the read loop's speculative client_closed and
+		// max_conn_time.
+		if hs.sub.closeReason == ReasonBufferOverflow || hs.exitReason != ReasonWriteError {
+			hs.exitReason = hs.sub.closeReason
+		}
+	} else {
+		hs.unsubscribe() // the server didn't tell us to close, so we must tell it that we're closing
+	}
+	if hs.reportedAdded {
+		hs.srv.traceSubscriberRemoved(hs.ctx, hs.sub, hs.exitReason, sinceOrZero(hs.connStart))
+	}
+}
+
+func (hs *handlerState) writeEventOrComment(ec eventOrComment) bool {
+	if err := hs.enc.Encode(ec); err != nil {
+		// No unsubscribe here: the deferred cleanup sends it moments later, and
+		// an early send would let run()'s unsubscription path start draining a
+		// mid-drain replay batch underneath the teardown's completion probe.
+		hs.exitReason = ReasonWriteError
+		hs.srv.traceWriteError(hs.ctx, hs.channel, err)
+		if hs.srv.Logger != nil {
+			hs.srv.Logger.Println(err)
+		}
+		return false // if this happens, we'll end the handler early because something's clearly broken
+	}
+	return true
+}
+
+func (hs *handlerState) writeEventOrCommentAndFlush(ec eventOrComment) bool {
+	return hs.srv.writeTraced(hs.ctx, hs.channel, ec, func() bool {
+		if !hs.writeEventOrComment(ec) {
+			return false
+		}
+		hs.flusher.Flush()
+		return true
+	})
+}
+
 // Handler creates a new HTTP handler for serving a specified channel.
 //
 // The channel does not have to have been previously registered with Register, but if it has been, the
@@ -148,46 +330,64 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 			maxConnTimeCh = t.C
 		}
 
+		// ctx is the subscriber's request context. It is threaded into the trace
+		// callbacks that fire on this handler goroutine, so a consumer can correlate
+		// telemetry with the request span, and it is handed to the subscription for
+		// the benefit of a Repository that implements RepositoryWithContext.
+		ctx := req.Context()
+
 		eventCh := make(chan eventOrComment, srv.BufferSize)
 		sub := &subscription{
 			channel:     channel,
 			lastEventID: req.Header.Get("Last-Event-ID"),
 			out:         eventCh,
-			ctx:         req.Context(),
-		}
-		srv.subs <- sub
-		flusher := w.(http.Flusher)
-		flusher.Flush()
-		enc := NewEncoder(w, useGzip)
-
-		// unsubscribe tells the Server this handler is going away. After the Server has
-		// shut down nothing consumes unsubs (and its small buffer may already be full),
-		// so a handler that exits late must not block forever on the send.
-		unsubscribe := func() {
-			select {
-			case srv.unsubs <- sub:
-			case <-srv.stopped:
-			}
+			ctx:         ctx,
 		}
 
-		writeEventOrComment := func(ec eventOrComment) bool {
-			if err := enc.Encode(ec); err != nil {
-				unsubscribe()
-				if srv.Logger != nil {
-					srv.Logger.Println(err)
-				}
-				return false // if this happens, we'll end the handler early because something's clearly broken
-			}
-			return true
+		// measuringReplay gates the replay accounting -- the clock reads and the
+		// extra per-event Data() call -- on something that will actually consume
+		// it: the ReplayFinished callback or the Logger's replay line. This
+		// mirrors shouldMeasureWrite's per-callback gating.
+		measuringReplay := (srv.Trace != nil && srv.Trace.ReplayFinished != nil) || srv.Logger != nil
+
+		hs := &handlerState{
+			srv:     srv,
+			sub:     sub,
+			ctx:     ctx,
+			channel: channel,
+			eventCh: eventCh,
+			flusher: w.(http.Flusher),
+			// connStart is meaningful only when something is observing the
+			// connection; beginSubscription returns the zero time otherwise,
+			// which sinceOrZero maps to a zero duration.
+			connStart: srv.beginSubscription(sub),
 		}
 
-		writeEventOrCommentAndFlush := func(ec eventOrComment) bool {
-			if !writeEventOrComment(ec) {
-				return false
-			}
-			flusher.Flush()
-			return true
+		defer hs.cleanup()
+		defer hs.reportExit()
+
+		hs.flusher.Flush()
+		// reportedAdded is set before the callback so that a panic inside
+		// SubscriberAdded itself still produces the balancing SubscriberRemoved.
+		hs.reportedAdded = true
+		// SubscriberAdded fires before the subscription is registered with the
+		// Server, so no other callback -- in particular SubscriberDropped, which
+		// can fire on the dispatch goroutine as soon as the Server knows the
+		// subscription -- can precede it. The HTTP response was already started
+		// by writeStreamHeaders above.
+		srv.traceSubscriberAdded(ctx, sub)
+
+		// If the Server closed while this handler was starting up, nothing will
+		// ever receive the registration; without the escape the handler would
+		// park on this send forever, leaking the goroutine and pinning the
+		// connection open.
+		select {
+		case srv.subs <- sub:
+		case <-srv.stopped:
+			hs.exitReason = ReasonServerClosed
+			return
 		}
+		hs.enc = NewEncoder(w, useGzip)
 
 		// The logic below works as follows:
 		// - Normally, the handler is reading from eventCh. Server.run() accesses this channel through sub.out
@@ -207,9 +407,7 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 		//   the Server to stop publishing events to it.
 
 		var readMainCh <-chan eventOrComment = eventCh
-		var readBatchCh <-chan Event
-		closedNormally := false
-		closeNotify := req.Context().Done()
+		closeNotify := ctx.Done()
 
 		// The handler consumes events in two different modes -- either as soon as
 		// they arrive, or on some jitter-influenced delay.
@@ -222,7 +420,6 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 		// functionality. The ping stream sends identical "ping" events, so
 		// discarding intermediate values is a safe operation.
 
-		var delayedEvent eventOrComment
 		jitterStrategy := newDefaultJitter(0.5, 0)
 
 		usingJitter := srv.jitter > 0
@@ -238,26 +435,31 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 		for {
 			select {
 			case <-closeNotify:
+				hs.exitReason = ReasonClientClosed
 				break ReadLoop
 			case <-maxConnTimeCh: // if MaxConnTime was not set, this is a nil channel and has no effect on the select
+				hs.exitReason = ReasonMaxConnTime
 				break ReadLoop
 			case <-jitterTimer.Channel():
 				// If the jitter is 0, we may have an initial event that fired before
 				// we could stop the timer. Or maybe the channel is being closed.
 				// Whatever the reason, we can safely discard here.
-				if !usingJitter || delayedEvent == nil {
+				if !usingJitter || hs.delayedEvent == nil {
 					continue
 				}
 
-				ok := writeEventOrCommentAndFlush(delayedEvent)
-				delayedEvent = nil
+				// Cleared before the write so that a panicking EventSent cannot
+				// leave the event to also be reported as discarded by the
+				// teardown.
+				delayed := hs.delayedEvent
+				hs.delayedEvent = nil
 
-				if !ok {
+				if !hs.writeEventOrCommentAndFlush(delayed) {
 					break ReadLoop
 				}
 			case ev, ok := <-readMainCh:
 				if !ok {
-					closedNormally = true
+					hs.closedNormally = true
 					break ReadLoop
 				}
 
@@ -265,24 +467,37 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 					// If we receive an event batch, we are meant to switch to this as
 					// our input source. But before we can do that, we need to process
 					// any event that was pending processing.
-					if delayedEvent != nil {
+					if hs.delayedEvent != nil {
 						jitterTimer.Stop()
-						ok := writeEventOrCommentAndFlush(delayedEvent)
-						delayedEvent = nil
+						// Cleared before the write, as in the timer case above.
+						delayed := hs.delayedEvent
+						hs.delayedEvent = nil
 
-						if !ok {
+						if !hs.writeEventOrCommentAndFlush(delayed) {
 							break ReadLoop
 						}
 					}
 
-					readBatchCh = batch.events
+					hs.readBatchCh = batch.events
 					readMainCh = nil
+					hs.replayCount = 0
+					hs.replayBytes = 0
+					// replayStart resets with the counts so that, if ReplayStarted
+					// panics below, the teardown's abort report cannot measure from
+					// a previous batch's start.
+					hs.replayStart = time.Time{}
+					srv.traceReplayStarted(ctx, channel)
+					// The drain clock starts after ReplayStarted returns, so the
+					// consumer's own callback cost is not billed to DrainDuration.
+					if measuringReplay {
+						hs.replayStart = time.Now()
+					}
 					continue
 				}
 
 				// Write immediately if we aren't using the jitter functionality.
 				if !usingJitter {
-					if !writeEventOrCommentAndFlush(ev) {
+					if !hs.writeEventOrCommentAndFlush(ev) {
 						break ReadLoop
 					}
 					continue
@@ -290,33 +505,39 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 
 				// If we are using jitter and we have a pending event, then we don't
 				// need to do anything. We can swallow this event.
-				if delayedEvent != nil {
+				if hs.delayedEvent != nil {
+					srv.traceEventDiscarded(ctx, channel, DiscardReasonJitterCoalesce)
 					continue
 				}
 
-				delayedEvent = ev
+				hs.delayedEvent = ev
 
 				// Figure out the jitter and start the timer. Once this trigger, we
 				// will write the event and clear the way for a new event to come in.
 				delay := jitterStrategy.applyJitter(srv.jitter)
 				jitterTimer.Reset(delay)
 
-			case ev, ok := <-readBatchCh:
+			case ev, ok := <-hs.readBatchCh:
 				if !ok { // end of batch
-					flusher.Flush()
-					readBatchCh = nil
+					hs.flusher.Flush()
+					hs.readBatchCh = nil
 					readMainCh = eventCh
+					// DrainDuration is measured after the flush above, so it accounts
+					// for the batch's single flush rather than excluding it.
+					srv.traceReplayFinished(ctx, sub, hs.replayCount, hs.replayBytes, sinceOrZero(hs.replayStart), false)
 					continue
 				}
 
-				if !writeEventOrComment(ev) {
+				// Replayed events are not flushed individually, so they report no
+				// EventSent; replay is observed at batch level via ReplayFinished.
+				if !hs.writeEventOrComment(ev) {
 					break ReadLoop
 				}
+				hs.replayCount++
+				if measuringReplay {
+					hs.replayBytes += int64(len(ev.Data()))
+				}
 			}
-		}
-		drainAbandonedBatches(readBatchCh, eventCh)
-		if !closedNormally {
-			unsubscribe() // the server didn't tell us to close, so we must tell it that we're closing
 		}
 	}
 }
@@ -338,7 +559,11 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 // the handler's unsubscription; the sweep of the already-buffered values here additionally
 // covers the case where the Server has shut down and will never process it. Anything the
 // Server enqueues concurrently with this sweep is still handled by the unsubscription path.
-func drainAbandonedBatches(current <-chan Event, eventCh <-chan eventOrComment) {
+//
+// The return value reports whether the sweep observed eventCh closed. A closed channel means
+// the Server ended this subscription and recorded a closeReason before closing, so the caller
+// can treat the exit as Server-initiated even if its read loop left for another reason first.
+func drainAbandonedBatches(current <-chan Event, eventCh <-chan eventOrComment) bool {
 	if current != nil {
 		go drainReplayedEvents(current)
 	}
@@ -346,13 +571,13 @@ func drainAbandonedBatches(current <-chan Event, eventCh <-chan eventOrComment) 
 		select {
 		case ev, ok := <-eventCh:
 			if !ok {
-				return
+				return true
 			}
 			if batch, isBatch := ev.(eventBatch); isBatch {
 				go drainReplayedEvents(batch.events)
 			}
 		default:
-			return
+			return false
 		}
 	}
 }
@@ -436,6 +661,41 @@ func replay(repo Repository, sub *subscription) <-chan Event {
 	return repo.Replay(sub.channel, sub.lastEventID)
 }
 
+// enqueueReplay hands a newly registered subscription its replay batch, when
+// the channel has a Repository and the request calls for a replay. Runs on the
+// Server.run() goroutine; subs is run()'s subscription map.
+func (srv *Server) enqueueReplay(
+	subs map[string]map[*subscription]struct{},
+	repos map[string]Repository,
+	sub *subscription,
+) {
+	if !srv.ReplayAll && len(sub.lastEventID) == 0 {
+		return
+	}
+	repo, ok := repos[sub.channel]
+	if !ok {
+		return
+	}
+	batchCh := replay(repo, sub)
+	if batchCh == nil {
+		return
+	}
+	if sub.send(eventBatch{events: batchCh}) {
+		// Remember the batch so that if the subscriber goes away before its
+		// handler dequeues it, the unsubs path can still drain it.
+		sub.batch = batchCh
+	} else {
+		// The send failed because the subscription's buffer was full (send
+		// closes the subscription in that case). The batch will never be
+		// consumed and its producer would otherwise block forever; drain it
+		// in the background. This is a drop like any other, so it reports
+		// SubscriberDropped just as trySend does.
+		delete(subs[sub.channel], sub)
+		srv.traceSubscriberDropped(sub)
+		go drainReplayedEvents(batchCh)
+	}
+}
+
 func (srv *Server) run() {
 	defer close(srv.stopped)
 	// All access to the subs and repos maps is done from the same goroutine, so modifications are safe.
@@ -445,6 +705,7 @@ func (srv *Server) run() {
 		if !sub.send(ec) {
 			sub.close()
 			delete(subs[sub.channel], sub)
+			srv.traceSubscriberDropped(sub)
 		}
 	}
 	for {
@@ -457,6 +718,7 @@ func (srv *Server) run() {
 			delete(subs, unreg.channel)
 			if unreg.forceDisconnect {
 				for s := range previousSubs {
+					s.closeReason = ReasonUnregistered
 					s.close()
 					// Unlike the unsubscription and shutdown cases, no batch drain is needed
 					// here: the server keeps running. A buffered channel delivers its queued
@@ -469,12 +731,14 @@ func (srv *Server) run() {
 		case sub := <-srv.unsubs:
 			delete(subs[sub.channel], sub)
 			if sub.batch != nil {
-				// The handler has exited. If it never dequeued the replay batch from its event
-				// channel -- or exited partway through consuming it -- the Repository's producer
-				// may still be blocked sending on it; drain it so the producer can finish. If the
-				// batch was fully consumed, the channel is already closed and this goroutine exits
-				// immediately. Draining concurrently with the handler's own exit-time drain is
-				// safe: both simply receive until the channel is closed.
+				// The handler has exited. If it never dequeued the replay batch from its
+				// event channel -- or exited partway through consuming it -- the
+				// Repository's producer may still be blocked sending on it; drain it so
+				// the producer can finish. Draining concurrently with the handler's own
+				// exit-time drain is safe: both simply receive until the channel is
+				// closed. This unsubscription arrives only after the handler's teardown
+				// has finished its exit-time reporting, so the drain cannot race the
+				// teardown's completion probe.
 				go drainReplayedEvents(sub.batch)
 				sub.batch = nil
 			}
@@ -497,47 +761,29 @@ func (srv *Server) run() {
 				subs[sub.channel] = make(map[*subscription]struct{})
 			}
 			subs[sub.channel][sub] = struct{}{}
-			if srv.ReplayAll || len(sub.lastEventID) > 0 {
-				repo, ok := repos[sub.channel]
-				if ok {
-					batchCh := replay(repo, sub)
-					if batchCh != nil {
-						if sub.send(eventBatch{events: batchCh}) {
-							// Remember the batch so that if the subscriber goes away before its
-							// handler dequeues it, the unsubs case below can still drain it.
-							sub.batch = batchCh
-						} else {
-							// The send failed because the subscription's buffer was full (send
-							// closes the subscription in that case). The batch will never be
-							// consumed and its producer would otherwise block forever; drain it
-							// in the background.
-							delete(subs[sub.channel], sub)
-							go drainReplayedEvents(batchCh)
-						}
-					}
-				}
-			}
+			srv.enqueueReplay(subs, repos, sub)
 		case <-srv.quit:
 			// We are about to stop processing unsubscriptions, so first handle any that are
 			// already queued: their handlers have exited, and a handler that swept its event
 			// channel before the replay batch was enqueued is relying on this path to drain it.
 			// Subscriptions handled here are deliberately not removed from the map -- the loop
-			// below revisits them, but with batch already nil and close() being idempotent
-			// that revisit is a no-op.
+			// below revisits them, recording a close reason and closing their channel. That is
+			// harmless: their handlers have already exited and read neither again.
 		DrainUnsubs:
 			for {
 				select {
 				case sub := <-srv.unsubs:
 					if sub.batch != nil {
 						go drainReplayedEvents(sub.batch)
-						sub.batch = nil
 					}
+					sub.batch = nil
 				default:
 					break DrainUnsubs
 				}
 			}
 			for _, sub := range subs {
 				for s := range sub {
+					s.closeReason = ReasonServerClosed
 					s.close()
 					// If the subscriber is already gone, its handler can no longer be relied on
 					// to consume or drain a batch, and its unsubscription may never be seen
@@ -584,6 +830,7 @@ func (s *subscription) send(e eventOrComment) bool {
 	case s.out <- e:
 		return true
 	default:
+		s.closeReason = ReasonBufferOverflow
 		s.close()
 		return false
 	}
