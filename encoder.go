@@ -67,9 +67,7 @@ func (enc *Encoder) Encode(ec eventOrComment) error {
 			return fmt.Errorf("eventsource encode: %v", err)
 		}
 	default:
-		// %T, not %v: an unexpected value must not have its contents -- which
-		// could include an event payload -- rendered into an error string that
-		// flows to WriteError consumers and logs.
+		// Logs the type (%T) and not the content, which may contain sensitive data.
 		return fmt.Errorf("unexpected parameter to Encode: %T", ec)
 	}
 	if enc.compressed {
