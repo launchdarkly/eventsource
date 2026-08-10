@@ -9,8 +9,12 @@ import (
 
 // mkRetryDelayWithCurves builds a retryDelayStrategy from streamOptions that
 // include a default curve, any number of registered curves, and an optional
-// stream-level reset interval. A resetInterval of 0 defers to the library default
-// (DefaultRetryResetInterval).
+// stream-level reset interval.
+//
+// The helper always addresses resetInterval, so passing 0 explicitly disables
+// the healthy-op reset (the NextRetryDelay reset check gates on
+// `resetInterval > 0`). Tests that want the library-default 60s fallback should
+// construct streamOptions directly and leave retryResetInterval nil.
 func mkRetryDelayWithCurves(
 	defaultCurve *RetryCurve,
 	registered []*RetryCurve,
@@ -240,11 +244,29 @@ func TestApplyRetryTimeUpdatesAllCurves(t *testing.T) {
 	d := r.NextRetryDelay(t0)
 	assert.Equal(t, time.Millisecond*500, d)
 
+	// Second attempt on the default curve: backoff continues to apply against
+	// the hinted base (500ms * 2^1 = 1s), pinning that ApplyRetryTime replaces
+	// the base but does not disable backoff.
+	d = r.NextRetryDelay(t0)
+	assert.Equal(t, time.Second, d)
+
+	// Third attempt on the default curve: 500ms * 2^2 = 2s (still under the
+	// 30s cap).
+	d = r.NextRetryDelay(t0)
+	assert.Equal(t, time.Second*2, d)
+
 	// Switch to extended. Extended's baseDelay is now also 500ms (per stream-level
-	// mutation) but its maxDelay ceiling of 1hr still applies.
+	// mutation) and its retryCount was zeroed by the hint. First attempt uses the
+	// hinted value literally; its maxDelay ceiling of 1hr still applies.
 	r.activateCurve(ext)
 	d = r.NextRetryDelay(t0)
 	assert.Equal(t, time.Millisecond*500, d)
+
+	// Second attempt on extended: 500ms * 2^1 = 1s. Backoff continues even after
+	// the hint replaces the base, and it does so independently of the default
+	// curve's own counter progression above.
+	d = r.NextRetryDelay(t0)
+	assert.Equal(t, time.Second, d)
 }
 
 // Base-delay mutations by ApplyRetryTime persist across healthy-operation reset —
@@ -496,4 +518,71 @@ func TestRetryCurveBaseDelayZeroIsExplicitNotUnset(t *testing.T) {
 	r2 := mkRetryDelayWithCurves(def, []*RetryCurve{unset}, 0, 0)
 	r2.activateCurve(unset)
 	assert.Equal(t, time.Second, r2.NextRetryDelay(time.Now()))
+}
+
+// RetryCurveMaxDelay(0) is the documented way to disable backoff on a specific
+// curve (per the docstring on RetryCurveMaxDelay in retry_curve.go). This must
+// override any positive default's maxDelay via the overlay stack — a curve
+// with an explicit zero max should NOT inherit the default's backoff ceiling.
+func TestRetryCurveMaxDelayZeroOverridesPositiveDefault(t *testing.T) {
+	// Effective default has a positive maxDelay, so backoff would double each
+	// attempt if inherited. Explicit-zero on the ext curve must disable that.
+	def := NewRetryCurve(
+		RetryCurveBaseDelay(time.Second),
+		RetryCurveMaxDelay(time.Minute),
+	)
+	explicitZeroMax := NewRetryCurve(
+		RetryCurveBaseDelay(time.Second),
+		RetryCurveMaxDelay(0),
+	)
+	r := mkRetryDelayWithCurves(def, []*RetryCurve{explicitZeroMax}, 0, 0)
+	r.activateCurve(explicitZeroMax)
+
+	// With backoff disabled every attempt uses the base delay directly; no
+	// doubling despite retryCount advancing.
+	t0 := time.Now()
+	assert.Equal(t, time.Second, r.NextRetryDelay(t0))
+	assert.Equal(t, time.Second, r.NextRetryDelay(t0))
+	assert.Equal(t, time.Second, r.NextRetryDelay(t0))
+
+	// Sanity: an unset maxDelay on a different curve DOES inherit the def's
+	// positive ceiling, so backoff kicks in.
+	unsetMax := NewRetryCurve(RetryCurveBaseDelay(time.Second))
+	r2 := mkRetryDelayWithCurves(def, []*RetryCurve{unsetMax}, 0, 0)
+	r2.activateCurve(unsetMax)
+	assert.Equal(t, time.Second, r2.NextRetryDelay(t0))
+	assert.Equal(t, time.Second*2, r2.NextRetryDelay(t0))
+}
+
+// RetryCurveJitter(0) is the documented way to disable jitter on a specific
+// curve. Analogous to the maxDelay-override test above: an explicit zero on
+// the ext curve must override a positive default jitter via the overlay stack.
+func TestRetryCurveJitterZeroOverridesPositiveDefault(t *testing.T) {
+	// Effective default has a positive jitter ratio (jitter subtracts up to 50%
+	// of the computed delay). Explicit-zero on the ext curve must disable it,
+	// so NextRetryDelay returns the raw base every time.
+	def := NewRetryCurve(
+		RetryCurveBaseDelay(time.Second),
+		RetryCurveJitter(0.5),
+	)
+	explicitZeroJitter := NewRetryCurve(
+		RetryCurveBaseDelay(time.Second),
+		RetryCurveJitter(0),
+	)
+	r := mkRetryDelayWithCurves(def, []*RetryCurve{explicitZeroJitter}, 0, 0)
+	r.activateCurve(explicitZeroJitter)
+
+	// No jitter → the delay is deterministically the base, regardless of RNG.
+	t0 := time.Now()
+	assert.Equal(t, time.Second, r.NextRetryDelay(t0))
+	assert.Equal(t, time.Second, r.NextRetryDelay(t0))
+
+	// Sanity: an unset jitter on a different curve DOES inherit the def's
+	// positive ratio, so the observed delay is strictly less than the base.
+	unsetJitter := NewRetryCurve(RetryCurveBaseDelay(time.Second))
+	r2 := mkRetryDelayWithCurves(def, []*RetryCurve{unsetJitter}, 0, 42)
+	r2.activateCurve(unsetJitter)
+	d := r2.NextRetryDelay(t0)
+	assert.Less(t, int64(d), int64(time.Second), "with inherited jitter the delay should be less than base")
+	assert.Greater(t, int64(d), int64(time.Millisecond*500), "with 50%% jitter cap the delay should still be at least half of base")
 }

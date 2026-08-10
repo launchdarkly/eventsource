@@ -267,7 +267,9 @@ func (r *retryDelayStrategy) ApplyRetryTime(hint time.Duration) {
 }
 
 // activateCurve switches the currently-active curve immediately. Silent no-op if
-// the curve is nil, unregistered, or already active.
+// the curve is nil or is not registered on this stream; when the passed curve
+// is already active, the write is redundant but idempotent (behaviorally
+// indistinguishable from a no-op).
 //
 // Does NOT reset the newly-activated curve's retryCount — each curve's counter
 // retains its progression across activations. Does NOT touch any curve's
