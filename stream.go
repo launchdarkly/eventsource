@@ -106,10 +106,12 @@ func SubscribeWith(lastEventID string, client *http.Client, request *http.Reques
 func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOption) (*Stream, error) {
 	defaultClient := *http.DefaultClient
 
+	// The four legacy retry-timing fields (initialRetry, backoffMaxDelay,
+	// jitterRatio, retryResetInterval) are intentionally left nil here
+	// so we can distinguish between "caller never set" and "caller
+	// explicitly requested zero".
 	configuredOptions := streamOptions{
-		httpClient:         &defaultClient,
-		initialRetry:       DefaultInitialRetry,
-		retryResetInterval: DefaultRetryResetInterval,
+		httpClient: &defaultClient,
 	}
 
 	for _, o := range options {

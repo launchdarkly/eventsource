@@ -20,7 +20,7 @@ func mkRetryDelayWithCurves(
 	opts := &streamOptions{
 		defaultRetryCurve:     defaultCurve,
 		registeredRetryCurves: registered,
-		retryResetInterval:    resetInterval,
+		retryResetInterval:    &resetInterval,
 	}
 	return newRetryDelayStrategyFromOptions(opts, randSeed)
 }
@@ -309,11 +309,15 @@ func TestRegisteredCurveEqualToDefaultIsDeduped(t *testing.T) {
 func TestLegacyOptionsSynthesizeEffectiveDefault(t *testing.T) {
 	// No explicit default curve provided; legacy stream options should populate
 	// the effective default.
+	initialRetry := time.Millisecond * 500
+	backoffMaxDelay := time.Second * 10
+	jitterRatio := float64(0)
+	retryResetInterval := time.Second * 30
 	opts := &streamOptions{
-		initialRetry:       time.Millisecond * 500,
-		backoffMaxDelay:    time.Second * 10,
-		jitterRatio:        0,
-		retryResetInterval: time.Second * 30,
+		initialRetry:       &initialRetry,
+		backoffMaxDelay:    &backoffMaxDelay,
+		jitterRatio:        &jitterRatio,
+		retryResetInterval: &retryResetInterval,
 	}
 	r := newRetryDelayStrategyFromOptions(opts, 0)
 

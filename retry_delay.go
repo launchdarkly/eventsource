@@ -103,18 +103,21 @@ func newRetryDelayStrategyFromOptions(opts *streamOptions, randSeed int64) *retr
 	// Resolve the effective default curve.
 	effectiveDefault := opts.defaultRetryCurve
 	if effectiveDefault == nil {
-		// Synthesize from legacy stream options.
+		// Synthesize from legacy stream options. Non-nil legacy pointers are
+		// always propagated (including zero values); nil means the caller never
+		// set the option and resolveCurveProperties should fall through to the
+		// hard-coded fallback. See streamOptions doc for the semantics of zero.
 		synth := &RetryCurve{}
-		if opts.initialRetry > 0 {
-			v := opts.initialRetry
+		if opts.initialRetry != nil {
+			v := *opts.initialRetry
 			synth.baseDelay = &v
 		}
-		if opts.backoffMaxDelay > 0 {
-			v := opts.backoffMaxDelay
+		if opts.backoffMaxDelay != nil {
+			v := *opts.backoffMaxDelay
 			synth.maxDelay = &v
 		}
-		if opts.jitterRatio > 0 {
-			v := opts.jitterRatio
+		if opts.jitterRatio != nil {
+			v := *opts.jitterRatio
 			synth.jitter = &v
 		}
 		effectiveDefault = synth
@@ -135,10 +138,13 @@ func newRetryDelayStrategyFromOptions(opts *streamOptions, randSeed int64) *retr
 		curves[c] = &perCurveState{}
 	}
 
-	// Stream-level reset interval falls back to the library default.
-	resetInterval := opts.retryResetInterval
-	if resetInterval <= 0 {
-		resetInterval = DefaultRetryResetInterval
+	// Stream-level reset interval: nil pointer means the caller never set it,
+	// so fall back to the library default. A non-nil pointer -- including one
+	// pointing at zero -- is propagated as-is; the healthy-op reset check in
+	// NextRetryDelay gates on `resetInterval > 0`, so &0 disables the reset.
+	resetInterval := DefaultRetryResetInterval
+	if opts.retryResetInterval != nil {
+		resetInterval = *opts.retryResetInterval
 	}
 
 	return &retryDelayStrategy{

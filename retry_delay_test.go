@@ -12,6 +12,13 @@ import (
 // effective default is synthesized from those values, with any remaining unset
 // properties falling through to the library's hard-coded fallbacks during lazy
 // overlay resolution.
+//
+// The helper always addresses every timing knob (including zero values), so
+// callers exercising the "explicit zero" leg of the API -- immediate retry for
+// baseDelay, disabled healthy-op reset for resetInterval, disabled backoff/
+// jitter for the other two -- can construct that state through the helper.
+// Tests wanting the "never set / library default" fallback should construct
+// streamOptions directly and leave the field nil.
 func mkRetryDelay(
 	baseDelay time.Duration,
 	resetInterval time.Duration,
@@ -20,10 +27,10 @@ func mkRetryDelay(
 	randSeed int64,
 ) *retryDelayStrategy {
 	opts := &streamOptions{
-		initialRetry:       baseDelay,
-		backoffMaxDelay:    backoffMaxDelay,
-		jitterRatio:        jitterRatio,
-		retryResetInterval: resetInterval,
+		initialRetry:       &baseDelay,
+		backoffMaxDelay:    &backoffMaxDelay,
+		jitterRatio:        &jitterRatio,
+		retryResetInterval: &resetInterval,
 	}
 	return newRetryDelayStrategyFromOptions(opts, randSeed)
 }
@@ -38,6 +45,53 @@ func TestFixedRetryDelay(t *testing.T) {
 	assert.Equal(t, d0, d1)
 	assert.Equal(t, d0, d2)
 	assert.Equal(t, d0, d3)
+}
+
+// Parity with pre-refactor behavior: StreamOptionInitialRetry(0) must yield a
+// zero retry delay (immediate retry). Under the pointer-based streamOptions,
+// nil means "never set" (falls back to DefaultInitialRetry) while &0 means
+// "caller explicitly requested immediate retry" -- this test pins the &0 leg.
+func TestLegacyInitialRetryZeroYieldsImmediateRetry(t *testing.T) {
+	r := mkRetryDelay(0, 0, 0, 0, 0)
+	t0 := time.Now().Add(-time.Minute)
+	assert.Equal(t, time.Duration(0), r.NextRetryDelay(t0))
+	assert.Equal(t, time.Duration(0), r.NextRetryDelay(t0.Add(time.Second)))
+}
+
+// The legacy-immediate-retry setting on the synthesized default curve must not
+// contaminate a separately-registered curve that has its own baseDelay. This
+// guards two invariants:
+//  1. resolveCurveProperties for the extended curve resolves against the
+//     extended curve's own spec first, then the effective default's spec.
+//     A baseDelay explicitly set on the extended curve wins.
+//  2. Reverting to the effective default (via activateCurve(DefaultCurve))
+//     restores immediate-retry behavior.
+func TestLegacyImmediateRetryDoesNotContaminateRegisteredCurve(t *testing.T) {
+	zero := time.Duration(0)
+	ext := NewRetryCurve(
+		RetryCurveBaseDelay(time.Minute*5),
+		RetryCurveMaxDelay(time.Hour),
+	)
+	opts := &streamOptions{
+		initialRetry:          &zero,
+		registeredRetryCurves: []*RetryCurve{ext},
+	}
+	r := newRetryDelayStrategyFromOptions(opts, 0)
+	t0 := time.Now()
+
+	// Default curve (synth) is active at start: immediate retry.
+	assert.Equal(t, time.Duration(0), r.NextRetryDelay(t0), "default curve should retry immediately")
+
+	// Switch to the extended curve: its own baseDelay drives the delay.
+	r.activateCurve(ext)
+	// retryCount starts at 0 for the extended curve, so applyBackoff yields base*2^0 = 5m.
+	assert.Equal(t, time.Minute*5, r.NextRetryDelay(t0), "extended curve should use its own baseDelay")
+	// Second attempt on extended: 5m*2 = 10m (still capped well below 1h).
+	assert.Equal(t, time.Minute*10, r.NextRetryDelay(t0), "extended curve backoff independent of default")
+
+	// Revert to effective default: immediate retry again.
+	r.activateCurve(DefaultCurve)
+	assert.Equal(t, time.Duration(0), r.NextRetryDelay(t0), "reverting to default restores immediate retry")
 }
 
 func TestBackoffWithoutJitter(t *testing.T) {

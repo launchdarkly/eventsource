@@ -7,14 +7,14 @@ import (
 )
 
 type streamOptions struct {
-	initialRetry          time.Duration
+	initialRetry          *time.Duration
+	backoffMaxDelay       *time.Duration
+	jitterRatio           *float64
+	retryResetInterval    *time.Duration
 	httpClient            *http.Client
 	lastEventID           string
 	logger                Logger
-	backoffMaxDelay       time.Duration
-	jitterRatio           float64
 	readTimeout           time.Duration
-	retryResetInterval    time.Duration
 	initialRetryTimeout   time.Duration
 	errorHandler          StreamErrorHandler
 	queryParamsFunc       *func(existing url.Values) url.Values
@@ -67,7 +67,8 @@ type initialRetryOption struct {
 }
 
 func (o initialRetryOption) apply(s *streamOptions) error {
-	s.initialRetry = o.retry
+	v := o.retry
+	s.initialRetry = &v
 	return nil
 }
 
@@ -91,7 +92,8 @@ type useBackoffOption struct {
 }
 
 func (o useBackoffOption) apply(s *streamOptions) error {
-	s.backoffMaxDelay = o.maxDelay
+	v := o.maxDelay
+	s.backoffMaxDelay = &v
 	return nil
 }
 
@@ -138,7 +140,8 @@ type useJitterOption struct {
 }
 
 func (o useJitterOption) apply(s *streamOptions) error {
-	s.jitterRatio = o.jitterRatio
+	v := o.jitterRatio
+	s.jitterRatio = &v
 	return nil
 }
 
@@ -163,7 +166,8 @@ type retryResetIntervalOption struct {
 }
 
 func (o retryResetIntervalOption) apply(s *streamOptions) error {
-	s.retryResetInterval = o.retryResetInterval
+	v := o.retryResetInterval
+	s.retryResetInterval = &v
 	return nil
 }
 
