@@ -12,13 +12,6 @@ import (
 // effective default is synthesized from those values, with any remaining unset
 // properties falling through to the library's hard-coded fallbacks during lazy
 // overlay resolution.
-//
-// The helper always addresses every timing knob (including zero values), so
-// callers exercising the "explicit zero" leg of the API -- immediate retry for
-// baseDelay, disabled healthy-op reset for resetInterval, disabled backoff/
-// jitter for the other two -- can construct that state through the helper.
-// Tests wanting the "never set / library default" fallback should construct
-// streamOptions directly and leave the field nil.
 func mkRetryDelay(
 	baseDelay time.Duration,
 	resetInterval time.Duration,
@@ -54,6 +47,34 @@ func TestFixedRetryDelay(t *testing.T) {
 func TestLegacyInitialRetryZeroYieldsImmediateRetry(t *testing.T) {
 	r := mkRetryDelay(0, 0, 0, 0, 0)
 	t0 := time.Now().Add(-time.Minute)
+	assert.Equal(t, time.Duration(0), r.NextRetryDelay(t0))
+	assert.Equal(t, time.Duration(0), r.NextRetryDelay(t0.Add(time.Second)))
+}
+
+// applyJitter must not panic when the effective jitter window is zero, which
+// happens whenever computedDelay is zero (regardless of ratio) or when a
+// nonzero delay multiplied by ratio truncates to zero. Pre-guard, this hit
+// rand.Int63n(0) and panicked at runtime; the guard returns the delay
+// unchanged since a zero window means there is no jitter to subtract.
+func TestApplyJitterDoesNotPanicOnZeroSpan(t *testing.T) {
+	j := newDefaultJitter(1)
+	// Zero delay with positive ratio: previous panic path.
+	assert.Equal(t, time.Duration(0), j.applyJitter(0, 0.5))
+	// Zero ratio with positive delay: no jitter window either.
+	assert.Equal(t, time.Second, j.applyJitter(time.Second, 0))
+	// Tiny delay + tiny ratio that truncates the int64 product to zero.
+	assert.Equal(t, time.Duration(1), j.applyJitter(time.Duration(1), 0.4))
+}
+
+// End-to-end parity check: StreamOptionInitialRetry(0) + a positive jitter
+// ratio (StreamOptionUseJitter) is a supported combination and must not
+// panic. Pre-guard this scenario reached rand.Int63n(0) via applyJitter and
+// crashed the retry loop.
+func TestLegacyImmediateRetryWithJitterDoesNotPanic(t *testing.T) {
+	r := mkRetryDelay(0, 0, 0, 0.5, 1)
+	t0 := time.Now().Add(-time.Minute)
+	// With effectiveBase = 0, applyBackoff is skipped (effectiveMax = 0), so
+	// delay stays 0. applyJitter with span = 0 must return 0 rather than panic.
 	assert.Equal(t, time.Duration(0), r.NextRetryDelay(t0))
 	assert.Equal(t, time.Duration(0), r.NextRetryDelay(t0.Add(time.Second)))
 }

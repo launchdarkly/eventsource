@@ -93,7 +93,11 @@ func (s *defaultJitterStrategy) applyJitter(computedDelay time.Duration, ratio f
 	if ratio > 1.0 {
 		ratio = 1.0
 	}
-	jitter := time.Duration(s.random.Int63n(int64(float64(computedDelay) * ratio)))
+	span := int64(float64(computedDelay) * ratio)
+	if span <= 0 {
+		return computedDelay
+	}
+	jitter := time.Duration(s.random.Int63n(span))
 	return computedDelay - jitter
 }
 
@@ -138,10 +142,6 @@ func newRetryDelayStrategyFromOptions(opts *streamOptions, randSeed int64) *retr
 		curves[c] = &perCurveState{}
 	}
 
-	// Stream-level reset interval: nil pointer means the caller never set it,
-	// so fall back to the library default. A non-nil pointer -- including one
-	// pointing at zero -- is propagated as-is; the healthy-op reset check in
-	// NextRetryDelay gates on `resetInterval > 0`, so &0 disables the reset.
 	resetInterval := DefaultRetryResetInterval
 	if opts.retryResetInterval != nil {
 		resetInterval = *opts.retryResetInterval
