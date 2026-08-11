@@ -18,8 +18,8 @@ type streamOptions struct {
 	initialRetryTimeout   time.Duration
 	errorHandler          StreamErrorHandler
 	queryParamsFunc       *func(existing url.Values) url.Values
-	defaultRetryCurve     *RetryCurve
-	registeredRetryCurves []*RetryCurve
+	defaultRetryProfile     *RetryProfile
+	registeredRetryProfiles []*RetryProfile
 }
 
 // StreamOption is a common interface for optional configuration parameters that can be
@@ -233,47 +233,47 @@ func StreamOptionLogger(logger Logger) StreamOption {
 	return loggerOption{logger: logger}
 }
 
-type defaultRetryCurveOption struct {
-	curve *RetryCurve
+type defaultRetryProfileOption struct {
+	profile *RetryProfile
 }
 
-func (o defaultRetryCurveOption) apply(s *streamOptions) error {
-	s.defaultRetryCurve = o.curve
+func (o defaultRetryProfileOption) apply(s *streamOptions) error {
+	s.defaultRetryProfile = o.profile
 	return nil
 }
 
-// StreamOptionDefaultRetryCurve returns an option that installs the effective default
-// retry curve for the stream — the curve that is active at stream start and the
-// curve the stream reverts to after a healthy-operation reset.
+// StreamOptionDefaultRetryProfile returns an option that installs the effective default
+// retry profile for the stream — the profile that is active at stream start and the
+// profile the stream reverts to after a healthy-operation reset.
 //
 // Every stream has an effective default at all times, so reset always has a valid
-// curve to revert to. If this option is not provided, the effective default is
+// profile to revert to. If this option is not provided, the effective default is
 // synthesized from the legacy stream options (StreamOptionInitialRetry,
 // StreamOptionUseBackoff, StreamOptionUseJitter, StreamOptionRetryResetInterval) —
 // any properties that remain unset fall through to the library's hard-coded
 // fallbacks during delay-computation time.
-func StreamOptionDefaultRetryCurve(curve *RetryCurve) StreamOption {
-	return defaultRetryCurveOption{curve: curve}
+func StreamOptionDefaultRetryProfile(profile *RetryProfile) StreamOption {
+	return defaultRetryProfileOption{profile: profile}
 }
 
-type registerRetryCurveOption struct {
-	curve *RetryCurve
+type registerRetryProfileOption struct {
+	profile *RetryProfile
 }
 
-func (o registerRetryCurveOption) apply(s *streamOptions) error {
-	if o.curve != nil {
-		s.registeredRetryCurves = append(s.registeredRetryCurves, o.curve)
+func (o registerRetryProfileOption) apply(s *streamOptions) error {
+	if o.profile != nil {
+		s.registeredRetryProfiles = append(s.registeredRetryProfiles, o.profile)
 	}
 	return nil
 }
 
-// StreamOptionRegisterRetryCurve returns an option that registers a curve on the
-// stream, making it eligible for runtime activation via Stream.ActivateCurve.
-// Unspecified properties on the curve inherit from the effective default curve.
+// StreamOptionRegisterRetryProfile returns an option that registers a profile on the
+// stream, making it eligible for runtime activation via Stream.ActivateProfile.
+// Unspecified properties on the profile inherit from the effective default profile.
 //
-// May be called multiple times to register more than one additional curve.
-func StreamOptionRegisterRetryCurve(curve *RetryCurve) StreamOption {
-	return registerRetryCurveOption{curve: curve}
+// May be called multiple times to register more than one additional profile.
+func StreamOptionRegisterRetryProfile(profile *RetryProfile) StreamOption {
+	return registerRetryProfileOption{profile: profile}
 }
 
 type streamErrorHandlerOption struct {

@@ -8,25 +8,26 @@ import (
 )
 
 // Encapsulation of the streaming retry-timing behavior. Supports one or more
-// RetryCurves registered on a stream at subscribe time, with a single
-// currently-active curve driving delay computation. See retry_curve.go for the
+// RetryProfiles registered on a stream at subscribe time, with a single
+// currently-active profile driving delay computation. See retry_profile.go for the
 // user-facing type; this file holds the internal machinery.
 //
-// The library uses lazy resolution at delay-computation time, using the active curve's spec,
+// The library uses lazy resolution at delay-computation time, using the active profile's spec,
 // falling through to the effective default's spec and then to hard-coded
 // fallbacks.
 //
-// Per-curve runtime state carries only two things: `retryCount` (the backoff
+// Per-profile runtime state carries only two things: `retryCount` (the backoff
 // formula counter n, per RETRY spec) and a nullable `baseDelayOverride` that
 // captures server-directed `retry:` hints.
 //
 // `baseDelayOverride` is NOT cleared on healthy-op reset — it persists until the
-// server sends another `retry:` hint or the Stream is closed, matching the HTML5
-// SSE spec's "reconnection time is set until updated" semantic.
+// server sends another `retry:` hint or the Stream is closed, matching the WHATWG
+// HTML Living Standard's EventSource "reconnection time is set until updated"
+// semantic.
 type retryDelayStrategy struct {
-	curves           map[*RetryCurve]*perCurveState
-	effectiveDefault *RetryCurve
-	active           *RetryCurve
+	profiles           map[*RetryProfile]*perProfileState
+	effectiveDefault *RetryProfile
+	active           *RetryProfile
 	resetInterval    time.Duration
 	goodSince        time.Time // nonzero only if the state is currently "good"
 	backoff          backoffStrategy
@@ -34,24 +35,24 @@ type retryDelayStrategy struct {
 	lock             sync.Mutex
 }
 
-// perCurveState carries the per-stream mutable runtime state for one registered
-// curve: its backoff-formula counter and any server-directed base-delay override.
-// The curve's own spec fields (baseDelay/maxDelay/jitter) live on the *RetryCurve
+// perProfileState carries the per-stream mutable runtime state for one registered
+// profile: its backoff-formula counter and any server-directed base-delay override.
+// The profile's own spec fields (baseDelay/maxDelay/jitter) live on the *RetryProfile
 // key itself and are read only.
-type perCurveState struct {
+type perProfileState struct {
 	retryCount        int
 	baseDelayOverride *time.Duration
 }
 
 // Abstraction for backoff delay behavior. The per-attempt effective maxDelay is
-// passed in per call so a single strategy instance can serve multiple retry curves
+// passed in per call so a single strategy instance can serve multiple retry profiles
 // with different ceilings.
 type backoffStrategy interface {
 	applyBackoff(baseDelay time.Duration, retryCount int, maxDelay time.Duration) time.Duration
 }
 
 // Abstraction for delay jitter behavior. The per-attempt effective ratio is passed
-// in per call so a single strategy instance can serve multiple retry curves with
+// in per call so a single strategy instance can serve multiple retry profiles with
 // different jitter ratios.
 type jitterStrategy interface {
 	applyJitter(computedDelay time.Duration, ratio float64) time.Duration
@@ -104,14 +105,14 @@ func (s *defaultJitterStrategy) applyJitter(computedDelay time.Duration, ratio f
 // newRetryDelayStrategyFromOptions constructs a retryDelayStrategy from resolved
 // streamOptions.
 func newRetryDelayStrategyFromOptions(opts *streamOptions, randSeed int64) *retryDelayStrategy {
-	// Resolve the effective default curve.
-	effectiveDefault := opts.defaultRetryCurve
+	// Resolve the effective default profile.
+	effectiveDefault := opts.defaultRetryProfile
 	if effectiveDefault == nil {
 		// Synthesize from legacy stream options. Non-nil legacy pointers are
 		// always propagated (including zero values); nil means the caller never
-		// set the option and resolveCurveProperties should fall through to the
+		// set the option and resolveProfileProperties should fall through to the
 		// hard-coded fallback. See streamOptions doc for the semantics of zero.
-		synth := &RetryCurve{}
+		synth := &RetryProfile{}
 		if opts.initialRetry != nil {
 			v := *opts.initialRetry
 			synth.baseDelay = &v
@@ -127,19 +128,19 @@ func newRetryDelayStrategyFromOptions(opts *streamOptions, randSeed int64) *retr
 		effectiveDefault = synth
 	}
 
-	// Build the per-curve runtime state map: effective default + any additional
-	// registered curves.
-	curves := map[*RetryCurve]*perCurveState{
+	// Build the per-profile runtime state map: effective default + any additional
+	// registered profiles.
+	profiles := map[*RetryProfile]*perProfileState{
 		effectiveDefault: {},
 	}
-	for _, c := range opts.registeredRetryCurves {
+	for _, c := range opts.registeredRetryProfiles {
 		if c == nil || c == effectiveDefault {
 			continue
 		}
-		if _, dup := curves[c]; dup {
+		if _, dup := profiles[c]; dup {
 			continue
 		}
-		curves[c] = &perCurveState{}
+		profiles[c] = &perProfileState{}
 	}
 
 	resetInterval := DefaultRetryResetInterval
@@ -148,7 +149,7 @@ func newRetryDelayStrategyFromOptions(opts *streamOptions, randSeed int64) *retr
 	}
 
 	return &retryDelayStrategy{
-		curves:           curves,
+		profiles:           profiles,
 		effectiveDefault: effectiveDefault,
 		active:           effectiveDefault,
 		resetInterval:    resetInterval,
@@ -157,10 +158,10 @@ func newRetryDelayStrategyFromOptions(opts *streamOptions, randSeed int64) *retr
 	}
 }
 
-// firstNonNil walks the two curve layers (primary then secondary) and returns the
+// firstNonNil walks the two profile layers (primary then secondary) and returns the
 // value of the first whose selected field is non-nil. Falls back to `fallback` if
 // neither has the field set (or is itself nil).
-func firstNonNil[T any](selector func(*RetryCurve) *T, primary, secondary *RetryCurve, fallback T) T {
+func firstNonNil[T any](selector func(*RetryProfile) *T, primary, secondary *RetryProfile, fallback T) T {
 	if primary != nil {
 		if v := selector(primary); v != nil {
 			return *v
@@ -174,24 +175,24 @@ func firstNonNil[T any](selector func(*RetryCurve) *T, primary, secondary *Retry
 	return fallback
 }
 
-// resolveCurveProperties computes the effective (baseDelay, maxDelay, jitter) for the given
-// curve handle by walking the overlay stack: curve.spec → effectiveDefault.spec →
+// resolveProfileProperties computes the effective (baseDelay, maxDelay, jitter) for the given
+// profile handle by walking the overlay stack: profile.spec → effectiveDefault.spec →
 // hard-coded fallbacks.
 //
 // Caller must hold r.lock.
-func (r *retryDelayStrategy) resolveCurveProperties(
-	c *RetryCurve,
+func (r *retryDelayStrategy) resolveProfileProperties(
+	c *RetryProfile,
 ) (baseDelay, maxDelay time.Duration, jitter float64) {
 	baseDelay = firstNonNil(
-		func(c *RetryCurve) *time.Duration { return c.baseDelay },
+		func(c *RetryProfile) *time.Duration { return c.baseDelay },
 		c, r.effectiveDefault, DefaultInitialRetry,
 	)
 	maxDelay = firstNonNil(
-		func(c *RetryCurve) *time.Duration { return c.maxDelay },
+		func(c *RetryProfile) *time.Duration { return c.maxDelay },
 		c, r.effectiveDefault, time.Duration(0),
 	)
 	jitter = firstNonNil(
-		func(c *RetryCurve) *float64 { return c.jitter },
+		func(c *RetryProfile) *float64 { return c.jitter },
 		c, r.effectiveDefault, float64(0),
 	)
 	return
@@ -201,11 +202,11 @@ func (r *retryDelayStrategy) resolveCurveProperties(
 //
 // Order of operations:
 //  1. Check the healthy-operation reset condition (goodSince non-zero AND elapsed >=
-//     resetInterval). If satisfied, apply reset: for each curve set retryCount = 0
+//     resetInterval). If satisfied, apply reset: for each profile set retryCount = 0
 //     (do NOT touch baseDelayOverride — persistent per SSE spec);
 //     active = effective default.
 //  2. Clear goodSince
-//  3. Resolve the active curve's effective properties; baseDelayOverride, if set, wins.
+//  3. Resolve the active profile's effective properties; baseDelayOverride, if set, wins.
 //  4. Compute delay = min(effectiveBase * 2^retryCount, effectiveMax) with jitter.
 //  5. Increment active.retryCount.
 //
@@ -216,7 +217,7 @@ func (r *retryDelayStrategy) NextRetryDelay(currentTime time.Time) time.Duration
 	defer r.lock.Unlock()
 
 	if !r.goodSince.IsZero() && r.resetInterval > 0 && (currentTime.Sub(r.goodSince) >= r.resetInterval) {
-		for _, c := range r.curves {
+		for _, c := range r.profiles {
 			c.retryCount = 0
 			// baseDelayOverride is NOT cleared intentionally
 		}
@@ -224,9 +225,9 @@ func (r *retryDelayStrategy) NextRetryDelay(currentTime time.Time) time.Duration
 	}
 	r.goodSince = time.Time{}
 
-	activeState := r.curves[r.active]
+	activeState := r.profiles[r.active]
 
-	effectiveBase, effectiveMax, effectiveJitter := r.resolveCurveProperties(r.active)
+	effectiveBase, effectiveMax, effectiveJitter := r.resolveProfileProperties(r.active)
 	if activeState.baseDelayOverride != nil {
 		effectiveBase = *activeState.baseDelayOverride
 	}
@@ -252,50 +253,50 @@ func (r *retryDelayStrategy) SetGoodSince(goodSince time.Time) {
 }
 
 // ApplyRetryTime records a server-directed reconnection-time hint received via the
-// SSE `retry:` field. It sets every registered curve's baseDelayOverride to the
-// given duration and zeroes every curve's retryCount (the backoff-formula counter),
+// SSE `retry:` field. It sets every registered profile's baseDelayOverride to the
+// given duration and zeroes every profile's retryCount (the backoff-formula counter),
 // so the immediate next attempt in whatever regime is active uses the hinted value.
-// The active curve is NOT changed.
+// The active profile is NOT changed.
 func (r *retryDelayStrategy) ApplyRetryTime(hint time.Duration) {
 	r.lock.Lock()
 	defer r.lock.Unlock()
-	for _, c := range r.curves {
+	for _, c := range r.profiles {
 		v := hint
 		c.baseDelayOverride = &v
 		c.retryCount = 0
 	}
 }
 
-// activateCurve switches the currently-active curve immediately. Silent no-op if
-// the curve is nil or is not registered on this stream; when the passed curve
+// activateProfile switches the currently-active profile immediately. Silent no-op if
+// the profile is nil or is not registered on this stream; when the passed profile
 // is already active, the write is redundant but idempotent (behaviorally
 // indistinguishable from a no-op).
 //
-// Does NOT reset the newly-activated curve's retryCount — each curve's counter
-// retains its progression across activations. Does NOT touch any curve's
+// Does NOT reset the newly-activated profile's retryCount — each profile's counter
+// retains its progression across activations. Does NOT touch any profile's
 // baseDelayOverride.
 //
 // If a healthy-operation reset fires on the next NextRetryDelay call, that reset
 // trumps this activation: active will be reverted to the effective default.
-func (r *retryDelayStrategy) activateCurve(c *RetryCurve) {
+func (r *retryDelayStrategy) activateProfile(c *RetryProfile) {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 	if c == nil {
 		return
 	}
-	if c == DefaultCurve {
+	if c == DefaultProfile {
 		r.active = r.effectiveDefault
 		return
 	}
-	if _, ok := r.curves[c]; !ok {
+	if _, ok := r.profiles[c]; !ok {
 		return
 	}
 	r.active = c
 }
 
-// activeCurve returns the currently-active *RetryCurve — a real curve pointer
-// registered on this stream, never the DefaultCurve sentinel.
-func (r *retryDelayStrategy) activeCurve() *RetryCurve { //nolint:unused // used only in tests
+// activeProfile returns the currently-active *RetryProfile — a real profile pointer
+// registered on this stream, never the DefaultProfile sentinel.
+func (r *retryDelayStrategy) activeProfile() *RetryProfile { //nolint:unused // used only in tests
 	r.lock.Lock()
 	defer r.lock.Unlock()
 	return r.active
@@ -304,6 +305,6 @@ func (r *retryDelayStrategy) activeCurve() *RetryCurve { //nolint:unused // used
 func (r *retryDelayStrategy) hasJitter() bool { //nolint:unused // used only in tests
 	r.lock.Lock()
 	defer r.lock.Unlock()
-	_, _, j := r.resolveCurveProperties(r.active)
+	_, _, j := r.resolveProfileProperties(r.active)
 	return j > 0
 }

@@ -8,7 +8,7 @@ import (
 )
 
 // mkRetryDelay constructs a retryDelayStrategy for tests that only exercise the
-// (single default curve) legacy shape. Uses legacy stream-option fields, so the
+// (single default profile) legacy shape. Uses legacy stream-option fields, so the
 // effective default is synthesized from those values, with any remaining unset
 // properties falling through to the library's hard-coded fallbacks during lazy
 // overlay resolution.
@@ -79,39 +79,39 @@ func TestLegacyImmediateRetryWithJitterDoesNotPanic(t *testing.T) {
 	assert.Equal(t, time.Duration(0), r.NextRetryDelay(t0.Add(time.Second)))
 }
 
-// The legacy-immediate-retry setting on the synthesized default curve must not
-// contaminate a separately-registered curve that has its own baseDelay. This
+// The legacy-immediate-retry setting on the synthesized default profile must not
+// contaminate a separately-registered profile that has its own baseDelay. This
 // guards two invariants:
-//  1. resolveCurveProperties for the extended curve resolves against the
-//     extended curve's own spec first, then the effective default's spec.
-//     A baseDelay explicitly set on the extended curve wins.
-//  2. Reverting to the effective default (via activateCurve(DefaultCurve))
+//  1. resolveProfileProperties for the extended profile resolves against the
+//     extended profile's own spec first, then the effective default's spec.
+//     A baseDelay explicitly set on the extended profile wins.
+//  2. Reverting to the effective default (via activateProfile(DefaultProfile))
 //     restores immediate-retry behavior.
-func TestLegacyImmediateRetryDoesNotContaminateRegisteredCurve(t *testing.T) {
+func TestLegacyImmediateRetryDoesNotContaminateRegisteredProfile(t *testing.T) {
 	zero := time.Duration(0)
-	ext := NewRetryCurve(
-		RetryCurveBaseDelay(time.Minute*5),
-		RetryCurveMaxDelay(time.Hour),
+	ext := NewRetryProfile(
+		RetryProfileBaseDelay(time.Minute*5),
+		RetryProfileMaxDelay(time.Hour),
 	)
 	opts := &streamOptions{
 		initialRetry:          &zero,
-		registeredRetryCurves: []*RetryCurve{ext},
+		registeredRetryProfiles: []*RetryProfile{ext},
 	}
 	r := newRetryDelayStrategyFromOptions(opts, 0)
 	t0 := time.Now()
 
-	// Default curve (synth) is active at start: immediate retry.
-	assert.Equal(t, time.Duration(0), r.NextRetryDelay(t0), "default curve should retry immediately")
+	// Default profile (synth) is active at start: immediate retry.
+	assert.Equal(t, time.Duration(0), r.NextRetryDelay(t0), "default profile should retry immediately")
 
-	// Switch to the extended curve: its own baseDelay drives the delay.
-	r.activateCurve(ext)
-	// retryCount starts at 0 for the extended curve, so applyBackoff yields base*2^0 = 5m.
-	assert.Equal(t, time.Minute*5, r.NextRetryDelay(t0), "extended curve should use its own baseDelay")
+	// Switch to the extended profile: its own baseDelay drives the delay.
+	r.activateProfile(ext)
+	// retryCount starts at 0 for the extended profile, so applyBackoff yields base*2^0 = 5m.
+	assert.Equal(t, time.Minute*5, r.NextRetryDelay(t0), "extended profile should use its own baseDelay")
 	// Second attempt on extended: 5m*2 = 10m (still capped well below 1h).
-	assert.Equal(t, time.Minute*10, r.NextRetryDelay(t0), "extended curve backoff independent of default")
+	assert.Equal(t, time.Minute*10, r.NextRetryDelay(t0), "extended profile backoff independent of default")
 
 	// Revert to effective default: immediate retry again.
-	r.activateCurve(DefaultCurve)
+	r.activateProfile(DefaultProfile)
 	assert.Equal(t, time.Duration(0), r.NextRetryDelay(t0), "reverting to default restores immediate retry")
 }
 
@@ -222,11 +222,11 @@ func TestClampServerDirectedRetry(t *testing.T) {
 	assert.Equal(t, MaxServerDirectedRetryDelay, clampServerDirectedRetry(9_223_372_036_854_775))
 }
 
-// ApplyRetryTime implements the HTML5 SSE spec's `retry:` directive: it sets the
-// stream-level reconnection time. The library maps that to (a) setting each
-// registered curve's baseDelayOverride uniformly and (b) resetting each curve's
-// backoff-formula counter so the immediate next attempt uses the hinted value
-// literally.
+// ApplyRetryTime implements the WHATWG HTML Living Standard's EventSource `retry:`
+// directive: it sets the reconnection time for the eventsource instance. The
+// library maps that to (a) setting each registered profile's baseDelayOverride
+// uniformly and (b) resetting each profile's backoff-formula counter so the
+// immediate next attempt uses the hinted value literally.
 func TestApplyRetryTimeUpdatesBaseAndResetsFormulaCounter(t *testing.T) {
 	d0 := time.Second
 	max := time.Minute
