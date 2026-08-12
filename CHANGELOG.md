@@ -2,6 +2,21 @@
 
 All notable changes to the project will be documented in this file. This project adheres to [Semantic Versioning](http://semver.org).
 
+## [1.13.0](https://github.com/launchdarkly/eventsource/compare/v1.12.0...v1.13.0) (2026-08-12)
+
+
+### Features
+
+* activate retry curves from error handler result ([295ff5f](https://github.com/launchdarkly/eventsource/commit/295ff5f3c968e7795960398f029b08e0d7fca526))
+* add named RetryCurve API for switching retry regimes at runtime ([0ef5312](https://github.com/launchdarkly/eventsource/commit/0ef5312bfa9c2994e5caa932aaae9fbf6a3a10db))
+* RetryProfile API for switching retry regimes at runtime ([#68](https://github.com/launchdarkly/eventsource/issues/68)) ([c430aec](https://github.com/launchdarkly/eventsource/commit/c430aec753170d2aefc4a74a0421385896700738))
+
+
+### Bug Fixes
+
+* distinguish unset from explicit-zero on legacy timing options ([ce80a7b](https://github.com/launchdarkly/eventsource/commit/ce80a7b1a1df85242d346852b1b81e85e776432c))
+* guard defaultJitterStrategy.applyJitter against zero span ([12f82f7](https://github.com/launchdarkly/eventsource/commit/12f82f76ebdc6915f0a2cbe0d8961b661f04b5cb))
+
 ## [1.12.0](https://github.com/launchdarkly/eventsource/compare/v1.11.2...v1.12.0) (2026-08-07)
 
 
