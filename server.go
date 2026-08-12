@@ -420,12 +420,12 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 		// functionality. The ping stream sends identical "ping" events, so
 		// discarding intermediate values is a safe operation.
 
-		jitterStrategy := newDefaultJitter(0.5, 0)
+		jitterStrategy := newDefaultJitter(0)
 
 		usingJitter := srv.jitter > 0
 		var jitterTimer timer
 		if usingJitter {
-			jitterTimer = &goTimer{timer: time.NewTimer(jitterStrategy.applyJitter(srv.jitter))}
+			jitterTimer = &goTimer{timer: time.NewTimer(jitterStrategy.applyJitter(srv.jitter, 0.5))}
 			jitterTimer.Stop()
 		} else {
 			jitterTimer = &noopTimer{C: make(<-chan time.Time)}
@@ -514,7 +514,7 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 
 				// Figure out the jitter and start the timer. Once this trigger, we
 				// will write the event and clear the way for a new event to come in.
-				delay := jitterStrategy.applyJitter(srv.jitter)
+				delay := jitterStrategy.applyJitter(srv.jitter, 0.5)
 				jitterTimer.Reset(delay)
 
 			case ev, ok := <-hs.readBatchCh:

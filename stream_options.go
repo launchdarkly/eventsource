@@ -7,17 +7,19 @@ import (
 )
 
 type streamOptions struct {
-	initialRetry        time.Duration
-	httpClient          *http.Client
-	lastEventID         string
-	logger              Logger
-	backoffMaxDelay     time.Duration
-	jitterRatio         float64
-	readTimeout         time.Duration
-	retryResetInterval  time.Duration
-	initialRetryTimeout time.Duration
-	errorHandler        StreamErrorHandler
-	queryParamsFunc     *func(existing url.Values) url.Values
+	initialRetry          *time.Duration
+	backoffMaxDelay       *time.Duration
+	jitterRatio           *float64
+	retryResetInterval    *time.Duration
+	httpClient            *http.Client
+	lastEventID           string
+	logger                Logger
+	readTimeout           time.Duration
+	initialRetryTimeout   time.Duration
+	errorHandler          StreamErrorHandler
+	queryParamsFunc       *func(existing url.Values) url.Values
+	defaultRetryProfile     *RetryProfile
+	registeredRetryProfiles []*RetryProfile
 }
 
 // StreamOption is a common interface for optional configuration parameters that can be
@@ -65,7 +67,8 @@ type initialRetryOption struct {
 }
 
 func (o initialRetryOption) apply(s *streamOptions) error {
-	s.initialRetry = o.retry
+	v := o.retry
+	s.initialRetry = &v
 	return nil
 }
 
@@ -89,7 +92,8 @@ type useBackoffOption struct {
 }
 
 func (o useBackoffOption) apply(s *streamOptions) error {
-	s.backoffMaxDelay = o.maxDelay
+	v := o.maxDelay
+	s.backoffMaxDelay = &v
 	return nil
 }
 
@@ -136,7 +140,8 @@ type useJitterOption struct {
 }
 
 func (o useJitterOption) apply(s *streamOptions) error {
-	s.jitterRatio = o.jitterRatio
+	v := o.jitterRatio
+	s.jitterRatio = &v
 	return nil
 }
 
@@ -161,7 +166,8 @@ type retryResetIntervalOption struct {
 }
 
 func (o retryResetIntervalOption) apply(s *streamOptions) error {
-	s.retryResetInterval = o.retryResetInterval
+	v := o.retryResetInterval
+	s.retryResetInterval = &v
 	return nil
 }
 
@@ -227,6 +233,49 @@ func StreamOptionLogger(logger Logger) StreamOption {
 	return loggerOption{logger: logger}
 }
 
+type defaultRetryProfileOption struct {
+	profile *RetryProfile
+}
+
+func (o defaultRetryProfileOption) apply(s *streamOptions) error {
+	s.defaultRetryProfile = o.profile
+	return nil
+}
+
+// StreamOptionDefaultRetryProfile returns an option that installs the effective default
+// retry profile for the stream — the profile that is active at stream start and the
+// profile the stream reverts to after a healthy-operation reset.
+//
+// Every stream has an effective default at all times, so reset always has a valid
+// profile to revert to. If this option is not provided, the effective default is
+// synthesized from the legacy stream options (StreamOptionInitialRetry,
+// StreamOptionUseBackoff, StreamOptionUseJitter, StreamOptionRetryResetInterval) —
+// any properties that remain unset fall through to the library's hard-coded
+// fallbacks during delay-computation time.
+func StreamOptionDefaultRetryProfile(profile *RetryProfile) StreamOption {
+	return defaultRetryProfileOption{profile: profile}
+}
+
+type registerRetryProfileOption struct {
+	profile *RetryProfile
+}
+
+func (o registerRetryProfileOption) apply(s *streamOptions) error {
+	if o.profile != nil {
+		s.registeredRetryProfiles = append(s.registeredRetryProfiles, o.profile)
+	}
+	return nil
+}
+
+// StreamOptionRegisterRetryProfile returns an option that registers a profile on the
+// stream, making it eligible for runtime activation via Stream.ActivateProfile.
+// Unspecified properties on the profile inherit from the effective default profile.
+//
+// May be called multiple times to register more than one additional profile.
+func StreamOptionRegisterRetryProfile(profile *RetryProfile) StreamOption {
+	return registerRetryProfileOption{profile: profile}
+}
+
 type streamErrorHandlerOption struct {
 	handler StreamErrorHandler
 }
@@ -258,4 +307,8 @@ const (
 	DefaultInitialRetry = time.Second * 3
 	// DefaultRetryResetInterval is the default value for StreamOptionRetryResetInterval.
 	DefaultRetryResetInterval = time.Second * 60
+	// MaxServerDirectedRetryDelay is the upper bound applied to server-directed
+	// reconnection times received via the SSE `retry:` field, per RETRY spec
+	// Requirement 1.11.4. Values above this ceiling are treated as this ceiling.
+	MaxServerDirectedRetryDelay = time.Hour * 1
 )

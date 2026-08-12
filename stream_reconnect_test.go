@@ -127,6 +127,121 @@ func TestStreamCanSetMaximumDelayWithBackoff(t *testing.T) {
 	assert.Equal(t, max, d2)
 }
 
+// The error handler advertised at interface.go can switch retry regimes by
+// returning ActivateProfile on its result. This test exercises the wiring in
+// SubscribeWithRequestAndOptions where the initial connect fails and the
+// handler returns an extended profile. After the retry succeeds, the strategy's
+// active profile must be the extended profile returned by the handler.
+func TestStreamErrorHandlerActivateProfileWiredOnInitialConnect(t *testing.T) {
+	streamHandler, streamControl := httphelpers.SSEHandler(nil)
+	defer streamControl.Close()
+	handler, requestsCh := httphelpers.RecordingHandler(httphelpers.SequentialHandler(
+		handlerCausingHTTPError(401, nil),
+		streamHandler,
+	))
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+
+	ext := NewRetryProfile(RetryProfileBaseDelay(time.Millisecond))
+
+	stream, err := SubscribeWithURL(httpServer.URL,
+		StreamOptionInitialRetry(time.Millisecond),
+		StreamOptionCanRetryFirstConnection(time.Second*2),
+		StreamOptionRegisterRetryProfile(ext),
+		StreamOptionErrorHandler(func(err error) StreamErrorHandlerResult {
+			return StreamErrorHandlerResult{ActivateProfile: ext}
+		}))
+	defer func() {
+		if stream != nil {
+			stream.Close()
+		}
+	}()
+	assert.NoError(t, err)
+	assert.Equal(t, 2, len(requestsCh), "expected 401 then successful reconnect")
+
+	// The initial-connect retry loop called activateProfile(ext) via the handler's
+	// result. That state should be observable on the strategy after subscribe
+	// returns, before any healthy-op reset could fire.
+	assert.Same(t, ext, stream.getRetryDelayStrategy().activeProfile(),
+		"error handler's ActivateProfile should have switched the active profile")
+}
+
+// Same wiring in the worker goroutine path: after a successful subscribe,
+// dropping the connection triggers the error handler with an existing-stream
+// error. If the handler returns ActivateProfile, the strategy should switch
+// before the next retry.
+func TestStreamErrorHandlerActivateProfileWiredOnExistingConnection(t *testing.T) {
+	streamHandler1, streamControl1 := httphelpers.SSEHandler(nil)
+	defer streamControl1.Close()
+	streamHandler2, streamControl2 := httphelpers.SSEHandler(nil)
+	defer streamControl2.Close()
+	handler, requestsCh := httphelpers.RecordingHandler(httphelpers.SequentialHandler(streamHandler1, streamHandler2))
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+
+	ext := NewRetryProfile(RetryProfileBaseDelay(time.Millisecond))
+
+	stream := mustSubscribe(t, httpServer.URL,
+		StreamOptionInitialRetry(time.Millisecond),
+		StreamOptionRegisterRetryProfile(ext),
+		StreamOptionErrorHandler(func(err error) StreamErrorHandlerResult {
+			return StreamErrorHandlerResult{ActivateProfile: ext}
+		}))
+	defer stream.Close()
+
+	// Wait for the initial connection to arrive at the server.
+	select {
+	case <-requestsCh:
+	case <-time.After(timeToWaitForEvent):
+		t.Fatal("timed out waiting for initial connection")
+	}
+
+	// Drop the initial connection so the worker goroutine's error path fires,
+	// invokes the handler, and applies ActivateProfile before scheduling retry.
+	streamControl1.Close()
+
+	// Wait for the reconnect. Once it lands, the handler has been invoked and
+	// activateProfile(ext) has been called by the worker path.
+	select {
+	case <-requestsCh:
+	case <-time.After(timeToWaitForEvent):
+		t.Fatal("timed out waiting for reconnect after connection drop")
+	}
+
+	assert.Same(t, ext, stream.getRetryDelayStrategy().activeProfile(),
+		"error handler's ActivateProfile should have switched the active profile on worker-path error")
+}
+
+// The public Stream.ActivateProfile method exposes the same activation primitive
+// to callers who want to switch regimes out-of-band (not via an error handler).
+// This test pins that the public method reaches the internal strategy.
+func TestStreamActivateProfilePublicMethodReachesStrategy(t *testing.T) {
+	streamHandler, streamControl := httphelpers.SSEHandler(nil)
+	defer streamControl.Close()
+	httpServer := httptest.NewServer(streamHandler)
+	defer httpServer.Close()
+
+	ext := NewRetryProfile(RetryProfileBaseDelay(time.Second * 5))
+
+	stream := mustSubscribe(t, httpServer.URL,
+		StreamOptionInitialRetry(time.Millisecond),
+		StreamOptionRegisterRetryProfile(ext))
+	defer stream.Close()
+
+	strat := stream.getRetryDelayStrategy()
+
+	// Sanity: pre-activation the active profile is whatever the effective default
+	// resolved to (a synthesized profile, not ext).
+	assert.NotSame(t, ext, strat.activeProfile(), "ext should not be active at start")
+
+	stream.ActivateProfile(ext)
+	assert.Same(t, ext, strat.activeProfile(), "public ActivateProfile should switch the active profile")
+
+	// Reverting via the DefaultProfile sentinel should undo the switch.
+	stream.ActivateProfile(DefaultProfile)
+	assert.NotSame(t, ext, strat.activeProfile(), "DefaultProfile sentinel should revert to effective default")
+}
+
 func TestStreamBackoffCanUseResetInterval(t *testing.T) {
 	// In this test, streamHandler1 sends an event, then breaks the connection too soon for the delay to be
 	// reset. We ask the retryDelayStrategy to compute the next delay; it should be higher than the initial

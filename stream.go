@@ -106,10 +106,12 @@ func SubscribeWith(lastEventID string, client *http.Client, request *http.Reques
 func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOption) (*Stream, error) {
 	defaultClient := *http.DefaultClient
 
+	// The four legacy retry-timing fields (initialRetry, backoffMaxDelay,
+	// jitterRatio, retryResetInterval) are intentionally left nil here
+	// so we can distinguish between "caller never set" and "caller
+	// explicitly requested zero".
 	configuredOptions := streamOptions{
-		httpClient:         &defaultClient,
-		initialRetry:       DefaultInitialRetry,
-		retryResetInterval: DefaultRetryResetInterval,
+		httpClient: &defaultClient,
 	}
 
 	for _, o := range options {
@@ -137,6 +139,9 @@ func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOpti
 		}
 		if configuredOptions.errorHandler != nil {
 			result := configuredOptions.errorHandler(err)
+			if result.ActivateProfile != nil {
+				stream.retryDelay.activateProfile(result.ActivateProfile)
+			}
 			if result.CloseNow {
 				return nil, err
 			}
@@ -161,20 +166,7 @@ func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOpti
 }
 
 func newStream(request *http.Request, configuredOptions streamOptions) *Stream {
-	var backoff backoffStrategy
-	var jitter jitterStrategy
-	if configuredOptions.backoffMaxDelay > 0 {
-		backoff = newDefaultBackoff(configuredOptions.backoffMaxDelay)
-	}
-	if configuredOptions.jitterRatio > 0 {
-		jitter = newDefaultJitter(configuredOptions.jitterRatio, 0)
-	}
-	retryDelay := newRetryDelayStrategy(
-		configuredOptions.initialRetry,
-		configuredOptions.retryResetInterval,
-		backoff,
-		jitter,
-	)
+	retryDelay := newRetryDelayStrategyFromOptions(&configuredOptions, 0)
 
 	stream := &Stream{
 		c:            configuredOptions.httpClient,
@@ -282,6 +274,9 @@ func (stream *Stream) stream(r io.ReadCloser, h http.Header) {
 	reportErrorAndMaybeContinue := func(err error) bool {
 		if stream.errorHandler != nil {
 			result := stream.errorHandler(err)
+			if result.ActivateProfile != nil {
+				stream.retryDelay.activateProfile(result.ActivateProfile)
+			}
 			if result.CloseNow {
 				stream.Close()
 				return false
@@ -360,7 +355,7 @@ NewStream:
 			case ev := <-events:
 				pub := ev.(*publication)
 				if pub.Retry() > 0 {
-					stream.retryDelay.SetBaseDelay(time.Duration(pub.Retry()) * time.Millisecond)
+					stream.retryDelay.ApplyRetryTime(clampServerDirectedRetry(pub.Retry()))
 				}
 				stream.lastEventID = pub.lastEventID
 				stream.retryDelay.SetGoodSince(time.Now())
@@ -394,6 +389,25 @@ func (stream *Stream) getRetryDelayStrategy() *retryDelayStrategy { //nolint:unu
 	return stream.retryDelay
 }
 
+// ActivateProfile switches the currently-active retry profile on this stream. The
+// change takes effect immediately.
+//
+// The profile argument must be one of: (a) a profile registered on this stream via
+// StreamOptionRegisterRetryProfile, (b) the stream's effective default profile
+// (installed via StreamOptionDefaultRetryProfile, or otherwise synthesized), or
+// (c) the package-level DefaultProfile sentinel — treated as a symbolic marker
+// meaning "revert to the effective default." Any other *RetryProfile is a silent no-op.
+//
+// If a healthy-operation reset fires on the next NextRetryDelay call, that reset
+// trumps this activation: the active profile will be reverted to the effective
+// default. This preserves the intuitive property that a single failure after a long
+// healthy period does not push the stream into the newly-activated regime.
+//
+// Safe to call from any goroutine, including the stream's error handler.
+func (stream *Stream) ActivateProfile(profile *RetryProfile) {
+	stream.retryDelay.activateProfile(profile)
+}
+
 // SetLogger sets the Logger field in a thread-safe manner.
 func (stream *Stream) SetLogger(logger Logger) {
 	stream.mu.Lock()
@@ -405,4 +419,12 @@ func (stream *Stream) getLogger() Logger {
 	stream.mu.RLock()
 	defer stream.mu.RUnlock()
 	return stream.Logger
+}
+
+func clampServerDirectedRetry(hintMs int64) time.Duration {
+	maxMs := int64(MaxServerDirectedRetryDelay / time.Millisecond)
+	if hintMs > maxMs {
+		hintMs = maxMs
+	}
+	return time.Duration(hintMs) * time.Millisecond
 }

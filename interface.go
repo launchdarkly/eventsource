@@ -120,6 +120,13 @@ type StreamErrorHandlerResult struct {
 	// connection it will retry the connection, and if the Stream is still being initialized then the
 	// retry behavior is configurable (see StreamOptionCanRetryFirstConnection).
 	CloseNow bool
+
+	// ActivateProfile, if non-nil, is a *RetryProfile that the Stream will activate before
+	// computing the next retry delay.
+	//
+	// If a healthy-operation reset fires on the same NextRetryDelay call, that reset
+	// trumps the activation (see Stream.ActivateProfile).
+	ActivateProfile *RetryProfile
 }
 
 // StreamErrorHandler is a function type used with StreamOptionErrorHandler.
@@ -141,6 +148,16 @@ type StreamErrorHandlerResult struct {
 //	    log.Printf("stream error: %s", err)
 //	    if se, ok := err.(eventsource.SubscriptionError); ok && se.Code == 401 {
 //	        return eventsource.StreamErrorHandlerResult{CloseNow: true}
+//	    }
+//	    return eventsource.StreamErrorHandlerResult{}
+//	}
+//
+// A handler may also switch retry regimes by returning an ActivateProfile; the Stream will
+// activate the returned profile before computing the next retry delay:
+//
+//	func handleError(err error) eventsource.StreamErrorHandlerResult {
+//	    if isUnexpected(err) {
+//	        return eventsource.StreamErrorHandlerResult{ActivateProfile: extendedProfile}
 //	    }
 //	    return eventsource.StreamErrorHandlerResult{}
 //	}
