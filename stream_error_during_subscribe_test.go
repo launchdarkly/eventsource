@@ -1,6 +1,8 @@
 package eventsource
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -222,4 +224,159 @@ func TestStreamErrorHandlerCanPreventRetryOfInitialConnection(t *testing.T) {
 	assert.Error(t, err)
 
 	assert.Equal(t, 1, len(requestsCh))
+}
+
+// Cancelling the request's context during a retry sleep aborts the retry loop
+// promptly with the context's error, rather than waiting for the sleep to elapse.
+// Uses a large retry delay so a passing test cannot be masked by the sleep
+// happening to finish before the cancel takes effect.
+func TestStreamSubscribeIsInterruptedByRequestContextDuringRetrySleep(t *testing.T) {
+	httpServer := httptest.NewServer(handlerCausingHTTPError(401, nil))
+	defer httpServer.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", httpServer.URL, nil)
+	assert.NoError(t, err)
+
+	// Cancel the context shortly after Subscribe enters its retry sleep. The
+	// retry delay is 10s so the test would time out if the sleep were still
+	// uninterruptible.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	stream, err := SubscribeWithRequestAndOptions(req,
+		StreamOptionInitialRetry(10*time.Second),
+		StreamOptionCanRetryFirstConnection(-1))
+	elapsed := time.Since(start)
+
+	assert.Nil(t, stream)
+	assert.True(t, errors.Is(err, context.Canceled), "expected context.Canceled, got %v", err)
+	assert.True(t, elapsed < 2*time.Second, "Subscribe should have returned promptly after ctx cancel, took %v", elapsed)
+}
+
+// Cancelling the request's context before Subscribe is called causes Subscribe
+// to abort at the first opportunity — its first connect() call is short-circuited
+// by http.Client honoring the already-cancelled context.
+func TestStreamSubscribeReturnsImmediatelyWhenRequestContextAlreadyCancelled(t *testing.T) {
+	httpServer := httptest.NewServer(handlerCausingHTTPError(401, nil))
+	defer httpServer.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancelled
+
+	req, err := http.NewRequestWithContext(ctx, "GET", httpServer.URL, nil)
+	assert.NoError(t, err)
+
+	handlerCalls := 0
+	stream, err := SubscribeWithRequestAndOptions(req,
+		StreamOptionInitialRetry(10*time.Second),
+		StreamOptionCanRetryFirstConnection(-1),
+		StreamOptionErrorHandler(func(err error) StreamErrorHandlerResult {
+			handlerCalls++
+			return StreamErrorHandlerResult{}
+		}))
+
+	assert.Nil(t, stream)
+	assert.True(t, errors.Is(err, context.Canceled), "expected context.Canceled, got %v", err)
+	// The error handler must not be invoked when the failure was caused by the
+	// caller cancelling the context — the caller has already decided to abandon.
+	assert.Equal(t, 0, handlerCalls, "error handler should not run on context cancellation")
+}
+
+// A request whose context has a deadline that expires during a retry sleep
+// causes Subscribe to return context.DeadlineExceeded, mirroring the
+// context.Canceled path. Uses a 1h retry delay so a passing test cannot be
+// explained by the sleep happening to complete before the deadline fires.
+func TestStreamSubscribeReturnsContextDeadlineExceededWhenDeadlinePasses(t *testing.T) {
+	httpServer := httptest.NewServer(handlerCausingHTTPError(401, nil))
+	defer httpServer.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", httpServer.URL, nil)
+	assert.NoError(t, err)
+
+	start := time.Now()
+	stream, err := SubscribeWithRequestAndOptions(req,
+		StreamOptionInitialRetry(time.Hour),
+		StreamOptionCanRetryFirstConnection(-1))
+	elapsed := time.Since(start)
+
+	assert.Nil(t, stream)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded),
+		"expected context.DeadlineExceeded, got %v", err)
+	assert.True(t, elapsed < 2*time.Second,
+		"Subscribe should return promptly after deadline expires, took %v", elapsed)
+}
+
+// A server that accepts the TCP connection but never sends a response blocks
+// stream.c.Do indefinitely. Cancelling the request context while Do is stuck
+// aborts the HTTP call and returns from Subscribe promptly. This is the
+// worst-case pre-connect scenario the RETRY conformance work made visible:
+// without ctx observation, Subscribe would never return.
+func TestStreamSubscribeIsInterruptedByRequestContextDuringInFlightDo(t *testing.T) {
+	blockCh := make(chan struct{})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-blockCh
+	})
+	httpServer := httptest.NewServer(handler)
+	// Defer order matters: close(blockCh) must run before httpServer.Close()
+	// so the blocked handler goroutine can exit and let the server shut down.
+	defer httpServer.Close()
+	defer close(blockCh)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", httpServer.URL, nil)
+	assert.NoError(t, err)
+
+	// Cancel after Subscribe has entered Do and is blocked waiting for the server.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	stream, err := SubscribeWithRequestAndOptions(req,
+		StreamOptionCanRetryFirstConnection(-1))
+	elapsed := time.Since(start)
+
+	assert.Nil(t, stream)
+	assert.True(t, errors.Is(err, context.Canceled),
+		"expected context.Canceled, got %v", err)
+	assert.True(t, elapsed < 1*time.Second,
+		"Do should abort promptly after ctx cancel, took %v", elapsed)
+}
+
+// Backward compatibility: requests built via http.NewRequest carry
+// context.Background, whose Done channel never fires. The retry loop must
+// behave identically to pre-context behavior — no premature return.
+func TestStreamSubscribeIsUnaffectedByBackgroundContextRequest(t *testing.T) {
+	streamHandler, streamControl := httphelpers.SSEHandler(nil)
+	defer streamControl.Close()
+	handler, requestsCh := httphelpers.RecordingHandler(httphelpers.SequentialHandler(
+		handlerCausingNetworkError(),
+		handlerCausingNetworkError(),
+		streamHandler))
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+
+	req, err := http.NewRequest("GET", httpServer.URL, nil) // no context
+	assert.NoError(t, err)
+
+	stream, err := SubscribeWithRequestAndOptions(req,
+		StreamOptionInitialRetry(time.Millisecond),
+		StreamOptionCanRetryFirstConnection(-1))
+	defer func() {
+		if stream != nil {
+			stream.Close()
+		}
+	}()
+	assert.NoError(t, err)
+	assert.Equal(t, 3, len(requestsCh))
 }

@@ -1,6 +1,7 @@
 package eventsource
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -37,12 +38,13 @@ type Stream struct {
 	//
 	// This field is exported for backward compatibility, but should not be set directly because
 	// it may be used by multiple goroutines. Use SetLogger instead.
-	Logger      Logger
-	restarter   chan struct{}
-	closer      chan struct{}
-	closeOnce   sync.Once
-	mu          sync.RWMutex
-	connections int
+	Logger         Logger
+	restarter      chan struct{}
+	mu             sync.RWMutex
+	connections    int
+	closeOnce      sync.Once
+	closer         chan struct{}
+	cancelCtxWatch func() bool
 }
 
 var (
@@ -85,6 +87,9 @@ func SubscribeWithURL(url string, options ...StreamOption) (*Stream, error) {
 
 // SubscribeWithRequest will take an http.Request to set up the stream, allowing custom headers
 // to be specified, authentication to be configured, etc.
+//
+// The request's context (request.Context()) is observed as a cancel signal.
+//
 // Deprecated: use SubscribeWithRequestAndOptions instead.
 func SubscribeWithRequest(lastEventID string, request *http.Request) (*Stream, error) {
 	return SubscribeWithRequestAndOptions(request, StreamOptionLastEventID(lastEventID))
@@ -92,7 +97,10 @@ func SubscribeWithRequest(lastEventID string, request *http.Request) (*Stream, e
 
 // SubscribeWith takes a HTTP client and request providing customization over both headers and
 // control over the HTTP client settings (timeouts, tls, etc)
-// If request.Body is set, then request.GetBody should also be set so that we can reissue the request
+// If request.Body is set, then request.GetBody should also be set so that we can reissue the request.
+//
+// The request's context (request.Context()) is observed as a cancel signal.
+//
 // Deprecated: use SubscribeWithRequestAndOptions instead.
 func SubscribeWith(lastEventID string, client *http.Client, request *http.Request) (*Stream, error) {
 	return SubscribeWithRequestAndOptions(request, StreamOptionHTTPClient(client),
@@ -103,7 +111,20 @@ func SubscribeWith(lastEventID string, client *http.Client, request *http.Reques
 // custom headers, authentication, etc. to be configured - and also takes any number of
 // StreamOption values to set other properties of the stream, such as timeouts or a specific
 // HTTP client to use.
-func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOption) (*Stream, error) {
+//
+// The request's context (request.Context()) is observed as a cancel signal.
+// If the context is cancelled before Subscribe returns a Stream, a context error is returned.
+// If the context is cancelled after Subscribe has returned a Stream, the stream is closed as if
+// [Stream.Close] had been called: any in-flight body read is aborted, any pending reconnect wait
+// is interrupted, and the read loop exits. Cancellation therefore covers the entire lifetime of
+// the stream.
+//
+// Callers who want to be able to abort a slow, stuck, or long-lived Subscribe should pass a
+// request built via [http.NewRequestWithContext] and cancel the context when they want the
+// stream to end. Callers who don't need cancellation may pass a request built via
+// [http.NewRequest]; that request carries [context.Background], which never fires Done and
+// imposes no behavior change.
+func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOption) (s *Stream, err error) {
 	defaultClient := *http.DefaultClient
 
 	// The four legacy retry-timing fields (initialRetry, backoffMaxDelay,
@@ -122,6 +143,15 @@ func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOpti
 
 	stream := newStream(request, configuredOptions)
 
+	// If we don't successfully hand the stream off, cleanup the instance before
+	// returning.
+	defer func() {
+		// s is the named return
+		if s == nil {
+			stream.Close()
+		}
+	}()
+
 	var initialRetryTimeoutCh <-chan time.Time
 	var lastError error
 	if configuredOptions.initialRetryTimeout > 0 {
@@ -134,6 +164,11 @@ func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOpti
 			return stream, nil
 		}
 		lastError = err
+		// If the caller cancelled the request's context, abort the retry loop
+		// immediately with the context error and don't invoke error handler.
+		if ctxErr := request.Context().Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		if configuredOptions.initialRetryTimeout == 0 {
 			return nil, err
 		}
@@ -154,6 +189,8 @@ func SubscribeWithRequestAndOptions(request *http.Request, options ...StreamOpti
 		}
 		nextRetryCh := time.After(delay)
 		select {
+		case <-request.Context().Done():
+			return nil, request.Context().Err()
 		case <-initialRetryTimeoutCh:
 			if lastError == nil {
 				lastError = errors.New("timeout elapsed while waiting to connect")
@@ -190,6 +227,15 @@ func newStream(request *http.Request, configuredOptions streamOptions) *Stream {
 		stream.Errors = make(chan error)
 	}
 
+	// cancelReferenceAssigned channel makes sure we have tracked the cancel
+	// token before it is possible for the after func to close anything down
+	cancelReferenceAssigned := make(chan struct{})
+	stream.cancelCtxWatch = context.AfterFunc(request.Context(), func() {
+		<-cancelReferenceAssigned
+		stream.Close()
+	})
+	close(cancelReferenceAssigned)
+
 	return stream
 }
 
@@ -217,6 +263,10 @@ func (stream *Stream) Restart() {
 func (stream *Stream) Close() {
 	stream.closeOnce.Do(func() {
 		close(stream.closer)
+		if stream.cancelCtxWatch != nil {
+			stream.cancelCtxWatch()
+			stream.cancelCtxWatch = nil
+		}
 	})
 }
 
@@ -272,6 +322,11 @@ func (stream *Stream) stream(r io.ReadCloser, h http.Header) {
 	}
 
 	reportErrorAndMaybeContinue := func(err error) bool {
+		// If the caller cancelled the request's context, exit the stream loop
+		// without invoking the error handler
+		if stream.req.Context().Err() != nil {
+			return false
+		}
 		if stream.errorHandler != nil {
 			result := stream.errorHandler(err)
 			if result.ActivateProfile != nil {
@@ -359,7 +414,12 @@ NewStream:
 				}
 				stream.lastEventID = pub.lastEventID
 				stream.retryDelay.SetGoodSince(time.Now())
-				stream.Events <- ev
+				select {
+				case stream.Events <- ev:
+				case <-stream.closer:
+					discardCurrentStream()
+					break NewStream
+				}
 			case <-stream.closer:
 				discardCurrentStream()
 				break NewStream
