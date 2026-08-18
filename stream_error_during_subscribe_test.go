@@ -266,7 +266,7 @@ func TestStreamSubscribeIsInterruptedByRequestContextDuringRetrySleep(t *testing
 }
 
 // Cancelling the request's context before Subscribe is called causes Subscribe
-// to abort at the first opportunity — its first connect() call is short-circuited
+// to abort at the first opportunity - its first connect() call is short-circuited
 // by http.Client honoring the already-cancelled context.
 func TestStreamSubscribeReturnsImmediatelyWhenRequestContextAlreadyCancelled(t *testing.T) {
 	httpServer := httptest.NewServer(handlerCausingHTTPError(401, nil))
@@ -291,7 +291,7 @@ func TestStreamSubscribeReturnsImmediatelyWhenRequestContextAlreadyCancelled(t *
 	assert.Nil(t, stream)
 	assert.True(t, errors.Is(err, context.Canceled), "expected context.Canceled, got %v", err)
 	// The error handler must not be invoked when the failure was caused by the
-	// caller cancelling the context — the caller has already decided to abandon.
+	// caller cancelling the context - the caller has already decided to abandon.
 	assert.Equal(t, 0, handlerCalls, "error handler should not run on context cancellation")
 }
 
@@ -368,7 +368,7 @@ func TestStreamSubscribeIsInterruptedByRequestContextDuringInFlightDo(t *testing
 
 // Backward compatibility: requests built via http.NewRequest carry
 // context.Background, whose Done channel never fires. The retry loop must
-// behave identically to pre-context behavior — no premature return.
+// behave identically to pre-context behavior - no premature return.
 func TestStreamSubscribeIsUnaffectedByBackgroundContextRequest(t *testing.T) {
 	streamHandler, streamControl := httphelpers.SSEHandler(nil)
 	defer streamControl.Close()
@@ -390,7 +390,7 @@ func TestStreamSubscribeIsUnaffectedByBackgroundContextRequest(t *testing.T) {
 		if stream != nil {
 			stream.Close()
 			// Drain until Events closes so the stream goroutine has fully
-			// exited before returning — leaving it running loads subsequent
+			// exited before returning - leaving it running loads subsequent
 			// tests' scheduling.
 			for range stream.Events { //nolint:revive
 			}

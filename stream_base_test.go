@@ -43,7 +43,7 @@ func mustSubscribe(t *testing.T, url string, options ...StreamOption) *Stream {
 
 // newIsolatedClient returns an *http.Client backed by a fresh Transport whose
 // idle connections are closed when the test finishes. Prevents cross-test
-// coupling through http.DefaultTransport's connection pool — force-closed
+// coupling through http.DefaultTransport's connection pool - force-closed
 // sockets from context-cancelled requests otherwise churn through slow
 // Windows TCP state transitions, destabilizing subsequent tests.
 func newIsolatedClient(t *testing.T) *http.Client {

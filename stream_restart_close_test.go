@@ -292,7 +292,7 @@ func TestStreamCloseReleasesAfterFuncListener(t *testing.T) {
 	httpServer := httptest.NewServer(streamHandler)
 	defer httpServer.Close()
 
-	// Long-lived context — if the AfterFunc listener isn't released on Close,
+	// Long-lived context - if the AfterFunc listener isn't released on Close,
 	// the parent ctx would keep the Stream alive as long as ctx itself lives.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -361,7 +361,7 @@ func TestStreamCloseUnblocksStalledEventsSend(t *testing.T) {
 	// Expect the channel to be closed WITHOUT the queued event being
 	// delivered. If the internal send arm weren't wrapped in a select with
 	// closer, this read would unblock the stalled send and receive the event
-	// (ok=true) — the assertion below would then fail.
+	// (ok=true) - the assertion below would then fail.
 	select {
 	case _, ok := <-stream.Events:
 		assert.False(t, ok, "expected stream.Events to be closed without delivering the queued event; "+
