@@ -41,6 +41,17 @@ func mustSubscribe(t *testing.T, url string, options ...StreamOption) *Stream {
 	return nil
 }
 
+// newIsolatedClient returns an *http.Client backed by a fresh Transport whose
+// idle connections are closed when the test finishes. Prevents cross-test
+// coupling through http.DefaultTransport's connection pool — force-closed
+// sockets from context-cancelled requests otherwise churn through slow
+// Windows TCP state transitions, destabilizing subsequent tests.
+func newIsolatedClient(t *testing.T) *http.Client {
+	tr := &http.Transport{}
+	t.Cleanup(func() { tr.CloseIdleConnections() })
+	return &http.Client{Transport: tr}
+}
+
 type urlSuffixingRoundTripper struct {
 	transport http.RoundTripper
 	suffix    string

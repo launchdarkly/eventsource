@@ -254,6 +254,7 @@ func TestStreamSubscribeIsInterruptedByRequestContextDuringRetrySleep(t *testing
 
 	start := time.Now()
 	stream, err := SubscribeWithRequestAndOptions(req,
+		StreamOptionHTTPClient(newIsolatedClient(t)),
 		StreamOptionInitialRetry(10*time.Second),
 		StreamOptionCanRetryFirstConnection(-1))
 	elapsed := time.Since(start)
@@ -279,6 +280,7 @@ func TestStreamSubscribeReturnsImmediatelyWhenRequestContextAlreadyCancelled(t *
 
 	handlerCalls := 0
 	stream, err := SubscribeWithRequestAndOptions(req,
+		StreamOptionHTTPClient(newIsolatedClient(t)),
 		StreamOptionInitialRetry(10*time.Second),
 		StreamOptionCanRetryFirstConnection(-1),
 		StreamOptionErrorHandler(func(err error) StreamErrorHandlerResult {
@@ -308,6 +310,7 @@ func TestStreamSubscribeReturnsContextDeadlineExceededWhenDeadlinePasses(t *test
 
 	start := time.Now()
 	stream, err := SubscribeWithRequestAndOptions(req,
+		StreamOptionHTTPClient(newIsolatedClient(t)),
 		StreamOptionInitialRetry(time.Hour),
 		StreamOptionCanRetryFirstConnection(-1))
 	elapsed := time.Since(start)
@@ -351,6 +354,7 @@ func TestStreamSubscribeIsInterruptedByRequestContextDuringInFlightDo(t *testing
 
 	start := time.Now()
 	stream, err := SubscribeWithRequestAndOptions(req,
+		StreamOptionHTTPClient(newIsolatedClient(t)),
 		StreamOptionCanRetryFirstConnection(-1))
 	elapsed := time.Since(start)
 	wg.Wait()
@@ -379,6 +383,7 @@ func TestStreamSubscribeIsUnaffectedByBackgroundContextRequest(t *testing.T) {
 	assert.NoError(t, err)
 
 	stream, err := SubscribeWithRequestAndOptions(req,
+		StreamOptionHTTPClient(newIsolatedClient(t)),
 		StreamOptionInitialRetry(time.Millisecond),
 		StreamOptionCanRetryFirstConnection(-1))
 	defer func() {

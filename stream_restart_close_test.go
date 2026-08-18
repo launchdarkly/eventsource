@@ -93,7 +93,7 @@ func TestStreamContextCancellationClosesEstablishedStream(t *testing.T) {
 	req, err := http.NewRequestWithContext(ctx, "GET", httpServer.URL, nil)
 	assert.NoError(t, err)
 
-	stream, err := SubscribeWithRequestAndOptions(req)
+	stream, err := SubscribeWithRequestAndOptions(req, StreamOptionHTTPClient(newIsolatedClient(t)))
 	assert.NoError(t, err)
 	defer stream.Close()
 
@@ -141,7 +141,9 @@ func TestStreamContextCancellationInterruptsReconnectSleep(t *testing.T) {
 
 	// Very long reconnect delay: if the sleep isn't interruptible, the test
 	// will hang past its 100ms wait budget below.
-	stream, err := SubscribeWithRequestAndOptions(req, StreamOptionInitialRetry(time.Hour))
+	stream, err := SubscribeWithRequestAndOptions(req,
+		StreamOptionHTTPClient(newIsolatedClient(t)),
+		StreamOptionInitialRetry(time.Hour))
 	assert.NoError(t, err)
 	defer stream.Close()
 
@@ -189,6 +191,7 @@ func TestStreamContextCancellationSkipsErrorHandlerPostConnect(t *testing.T) {
 
 	var handlerCalls atomic.Int32
 	stream, err := SubscribeWithRequestAndOptions(req,
+		StreamOptionHTTPClient(newIsolatedClient(t)),
 		StreamOptionErrorHandler(func(err error) StreamErrorHandlerResult {
 			handlerCalls.Add(1)
 			return StreamErrorHandlerResult{}
@@ -241,6 +244,7 @@ func TestStreamContextCancellationDuringReconnectSkipsErrorHandler(t *testing.T)
 
 	var handlerSawCanceled atomic.Bool
 	stream, err := SubscribeWithRequestAndOptions(req,
+		StreamOptionHTTPClient(newIsolatedClient(t)),
 		StreamOptionInitialRetry(20*time.Millisecond),
 		StreamOptionErrorHandler(func(err error) StreamErrorHandlerResult {
 			if errors.Is(err, context.Canceled) {
@@ -301,7 +305,7 @@ func TestStreamCloseReleasesAfterFuncListener(t *testing.T) {
 	// goes out of scope after this function returns, giving GC a chance to
 	// reclaim it.
 	func() {
-		stream, err := SubscribeWithRequestAndOptions(req)
+		stream, err := SubscribeWithRequestAndOptions(req, StreamOptionHTTPClient(newIsolatedClient(t)))
 		assert.NoError(t, err)
 		runtime.SetFinalizer(stream, func(*Stream) { close(finalized) })
 		stream.Close()
@@ -336,7 +340,10 @@ func TestStreamCloseUnblocksStalledEventsSend(t *testing.T) {
 	httpServer := httptest.NewServer(streamHandler)
 	defer httpServer.Close()
 
-	stream := mustSubscribe(t, httpServer.URL)
+	req, err := http.NewRequest("GET", httpServer.URL, nil)
+	assert.NoError(t, err)
+	stream, err := SubscribeWithRequestAndOptions(req, StreamOptionHTTPClient(newIsolatedClient(t)))
+	assert.NoError(t, err)
 
 	// Enqueue an event but never drain stream.Events. The decoder produces
 	// the event, the main loop accepts it into local `ev`, and then blocks
