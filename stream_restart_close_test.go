@@ -89,7 +89,6 @@ func TestStreamClose(t *testing.T) {
 	}
 }
 
-/*
 // Cancelling the request's context on an established stream terminates the stream
 // through the same path as Stream.Close: Events and Errors channels close, no
 // goroutine is left waiting.
@@ -135,9 +134,7 @@ func TestStreamContextCancellationClosesEstablishedStream(t *testing.T) {
 		t.Error("Timed out waiting for stream.Errors channel to close after ctx cancel")
 	}
 }
-*/
 
-/*
 // Cancelling the context while the stream is in a mid-life reconnect sleep
 // interrupts that sleep and terminates the stream promptly, rather than
 // waiting for the retry delay to elapse.
@@ -185,9 +182,7 @@ func TestStreamContextCancellationInterruptsReconnectSleep(t *testing.T) {
 		t.Error("Timed out waiting for stream.Events channel to close after ctx cancel")
 	}
 }
-*/
 
-/*
 // The error handler must not be invoked with a context.Canceled error caused
 // by the caller cancelling the request's context. The caller has already
 // decided to abandon; a spurious "your stream failed" callback would be noise.
@@ -231,7 +226,6 @@ func TestStreamContextCancellationSkipsErrorHandlerPostConnect(t *testing.T) {
 	assert.Equal(t, int32(0), handlerCalls.Load(),
 		"error handler should not be invoked when the caller cancelled the context")
 }
-*/
 
 /*
 // Post-connect reconnect path: after a successful initial connect, the stream
