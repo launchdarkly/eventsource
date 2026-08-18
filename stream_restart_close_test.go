@@ -15,15 +15,6 @@ import (
 	"github.com/launchdarkly/go-test-helpers/v3/httphelpers"
 )
 
-// Keep imports live while some tests are commented out for bisection.
-var (
-	_ = context.Background
-	_ = errors.New
-	_ = http.NewRequest
-	_ = runtime.GC
-	_ = atomic.AddInt64
-)
-
 func toPublication(e httphelpers.SSEEvent) *publication {
 	return &publication{
 		id:    e.ID,

@@ -6,18 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 
 	"github.com/launchdarkly/go-test-helpers/v3/httphelpers"
-)
-
-// Keep imports live while some tests are commented out for bisection.
-var (
-	_ = context.Background
-	_ = errors.New
 )
 
 func handlerCausingNetworkError() http.Handler {
@@ -249,7 +244,10 @@ func TestStreamSubscribeIsInterruptedByRequestContextDuringRetrySleep(t *testing
 	// Cancel the context shortly after Subscribe enters its retry sleep. The
 	// retry delay is 10s so the test would time out if the sleep were still
 	// uninterruptible.
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		time.Sleep(50 * time.Millisecond)
 		cancel()
 	}()
@@ -259,6 +257,7 @@ func TestStreamSubscribeIsInterruptedByRequestContextDuringRetrySleep(t *testing
 		StreamOptionInitialRetry(10*time.Second),
 		StreamOptionCanRetryFirstConnection(-1))
 	elapsed := time.Since(start)
+	wg.Wait()
 
 	assert.Nil(t, stream)
 	assert.True(t, errors.Is(err, context.Canceled), "expected context.Canceled, got %v", err)
@@ -342,7 +341,10 @@ func TestStreamSubscribeIsInterruptedByRequestContextDuringInFlightDo(t *testing
 	assert.NoError(t, err)
 
 	// Cancel after Subscribe has entered Do and is blocked waiting for the server.
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		time.Sleep(50 * time.Millisecond)
 		cancel()
 	}()
@@ -351,6 +353,7 @@ func TestStreamSubscribeIsInterruptedByRequestContextDuringInFlightDo(t *testing
 	stream, err := SubscribeWithRequestAndOptions(req,
 		StreamOptionCanRetryFirstConnection(-1))
 	elapsed := time.Since(start)
+	wg.Wait()
 
 	assert.Nil(t, stream)
 	assert.True(t, errors.Is(err, context.Canceled),
@@ -381,6 +384,11 @@ func TestStreamSubscribeIsUnaffectedByBackgroundContextRequest(t *testing.T) {
 	defer func() {
 		if stream != nil {
 			stream.Close()
+			// Drain until Events closes so the stream goroutine has fully
+			// exited before returning — leaving it running loads subsequent
+			// tests' scheduling.
+			for range stream.Events { //nolint:revive
+			}
 		}
 	}()
 	assert.NoError(t, err)
