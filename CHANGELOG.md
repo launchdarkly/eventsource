@@ -2,6 +2,14 @@
 
 All notable changes to the project will be documented in this file. This project adheres to [Semantic Versioning](http://semver.org).
 
+## [1.14.0](https://github.com/launchdarkly/eventsource/compare/v1.13.0...v1.14.0) (2026-08-18)
+
+
+### Features
+
+* observe request.Context() as a Subscribe-lifetime cancel signal ([60c4248](https://github.com/launchdarkly/eventsource/commit/60c42489f9d377fd9f8500cb1118838f6edafe76))
+* observe request.Context() as a Subscribe-lifetime cancel signal ([#71](https://github.com/launchdarkly/eventsource/issues/71)) ([039d56a](https://github.com/launchdarkly/eventsource/commit/039d56aacf97b8ba96a58c5652aca68eaa6d8b33))
+
 ## [1.13.0](https://github.com/launchdarkly/eventsource/compare/v1.12.0...v1.13.0) (2026-08-12)
 
 
