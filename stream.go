@@ -7,8 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // Stream handles a connection for receiving Server Sent Events.
@@ -53,19 +55,58 @@ var (
 	ErrReadTimeout = errors.New("Read timeout on stream")
 )
 
+// maxErrorBodyLength is how much of an error response body SubscriptionError keeps.
+//
+// The body is diagnostic. Nothing in this library reads it, and the only thing that looks at it
+// is a person reading a log line, so it is held to a length a log line can carry. A service
+// error message is tens of bytes. A proxy's error page puts its useful text in the first line.
+// This leaves room to spare for both.
+const maxErrorBodyLength = 256
+
 // SubscriptionError is an error object returned from a stream when there is an HTTP error.
 type SubscriptionError struct {
-	Code    int
+	Code int
+	// Message is the response body, as sent. It is cut to 256 bytes and marked when the body
+	// was longer. It comes from whatever answered the request, which may be an intermediary
+	// rather than the intended service, so it can hold any text at all. Use Error to render it
+	// for a log.
 	Message string
 	Header  http.Header
 }
 
+// Error describes the failure on one line.
+//
+// The response body is part of the description, with every control character replaced by a
+// space. The body is not under the caller's control, and a caller that writes this string to a
+// log must not have to defend against text that ends the line and starts another one that looks
+// just as genuine.
 func (e SubscriptionError) Error() string {
 	s := fmt.Sprintf("error %d", e.Code)
 	if e.Message != "" {
-		s = s + ": " + e.Message
+		s = s + ": " + singleLine(e.Message)
 	}
 	return s
+}
+
+// singleLine replaces every control character with a space, so the text cannot span lines, and
+// removes the leading and trailing space that leaves behind.
+func singleLine(s string) string {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s))
+}
+
+// readErrorBody reads an error response body up to maxErrorBodyLength. It marks the text when
+// the body was longer, so a reader can tell a whole message from a cut one.
+func readErrorBody(body io.Reader) string {
+	message, _ := io.ReadAll(io.LimitReader(body, maxErrorBodyLength+1))
+	if len(message) > maxErrorBodyLength {
+		return string(message[:maxErrorBodyLength]) + "... (truncated)"
+	}
+	return string(message)
 }
 
 // Subscribe to the Events emitted from the specified url.
@@ -295,11 +336,11 @@ func (stream *Stream) connect() (io.ReadCloser, http.Header, error) {
 	}
 	stream.connections++
 	if resp.StatusCode != 200 {
-		message, _ := io.ReadAll(resp.Body)
+		message := readErrorBody(resp.Body)
 		_ = resp.Body.Close()
 		err = SubscriptionError{
 			Code:    resp.StatusCode,
-			Message: string(message),
+			Message: message,
 			Header:  resp.Header,
 		}
 		return nil, nil, err
