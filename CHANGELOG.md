@@ -2,6 +2,13 @@
 
 All notable changes to the project will be documented in this file. This project adheres to [Semantic Versioning](http://semver.org).
 
+## [1.14.1](https://github.com/launchdarkly/eventsource/compare/v1.14.0...v1.14.1) (2026-09-16)
+
+
+### Bug Fixes
+
+* **test:** Stop TestServerHandlesLoadsOfPendingTasks deadlocking ([#76](https://github.com/launchdarkly/eventsource/issues/76)) ([d51d9b0](https://github.com/launchdarkly/eventsource/commit/d51d9b0e943d5f1e33e281b8dd260176393ee012))
+
 ## [1.14.0](https://github.com/launchdarkly/eventsource/compare/v1.13.0...v1.14.0) (2026-08-18)
 
 
