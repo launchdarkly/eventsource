@@ -5,7 +5,6 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 	"time"
 
@@ -58,21 +57,23 @@ func TestServerHandlesLoadsOfPendingTasks(t *testing.T) {
 	channel := "test"
 	server := NewServer()
 	httpServer := httptest.NewServer(server.Handler(channel))
+	// The deferred calls run in reverse order: the subscriber disconnects, then the Server
+	// stops, and only then does httptest wait for the handler. Each step is what lets the
+	// next one finish.
 	defer httpServer.Close()
+	defer server.Close()
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	go func() {
-		_, _ = http.Get(httpServer.URL)
-		wg.Wait()
-	}()
+	// A subscriber has to stay connected while the comments are published, so that the Server
+	// has somewhere to queue them. http.Get returns once the handler has flushed the SSE
+	// response headers, so the connection is established and stays up until the body closes.
+	resp, err := http.Get(httpServer.URL)
+	require.NoError(t, err)
+	defer resp.Body.Close()
 
 	server.Register(channel, &testServerRepository{})
 	for i := 0; i < 1000; i++ {
 		server.PublishComment([]string{channel}, "my comment")
 	}
-	wg.Done()
 }
 
 func TestServerHandlerReceivesPublishedEvents(t *testing.T) {
