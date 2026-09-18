@@ -1,0 +1,210 @@
+package eventsource
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	neturl "net/url"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+const writeTimeoutTestDeadline = 2 * time.Second
+
+// Larger than net/http's 2 KB pre-chunking buffer, so each event reaches the socket.
+const blockingEventSize = 64 * 1024
+
+const blockingEventCount = 200
+
+// unreadSSEConn sends a valid SSE request, consumes the response headers, then never reads
+// again. Callers must resetConn it before httptest.Server.Close, which waits on handlers.
+func unreadSSEConn(t *testing.T, url string) *net.TCPConn {
+	t.Helper()
+	u, err := neturl.Parse(url)
+	require.NoError(t, err)
+	c, err := net.Dial("tcp", u.Host)
+	require.NoError(t, err)
+	conn, ok := c.(*net.TCPConn)
+	require.True(t, ok)
+	require.NoError(t, conn.SetReadBuffer(4096))
+	_, err = fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: %s\r\nAccept: text/event-stream\r\n\r\n", u.Host)
+	require.NoError(t, err)
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(writeTimeoutTestDeadline)))
+	var head []byte
+	buf := make([]byte, 1)
+	for !bytes.HasSuffix(head, []byte("\r\n\r\n")) {
+		n, err := conn.Read(buf)
+		require.NoError(t, err)
+		head = append(head, buf[:n]...)
+	}
+	require.Contains(t, string(head), "200 OK")
+	require.NoError(t, conn.SetReadDeadline(time.Time{}))
+	return conn
+}
+
+// resetConn sends RST so a handler parked in a write to this connection is released.
+func resetConn(t *testing.T, conn *net.TCPConn) {
+	t.Helper()
+	_ = conn.SetLinger(0)
+	_ = conn.Close()
+}
+
+func publishBlockingEvents(server *Server, channel string) {
+	data := strings.Repeat("x", blockingEventSize)
+	for i := 0; i < blockingEventCount; i++ {
+		server.Publish([]string{channel}, &publication{id: strconv.Itoa(i), data: data})
+	}
+}
+
+// BufferSize holds the whole payload so buffer overflow can never be what drops the subscriber.
+func newWriteTimeoutServer(rec *traceRecorder, writeTimeout time.Duration) *Server {
+	server := NewServer()
+	server.BufferSize = blockingEventCount * 2
+	server.WriteTimeout = writeTimeout
+	server.Trace = rec.trace()
+	return server
+}
+
+func waitForAtLeast(t *testing.T, what string, want int, count func() int) {
+	t.Helper()
+	deadline := time.Now().Add(writeTimeoutTestDeadline)
+	for {
+		if n := count(); n >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for %s (want at least %d, have %d)",
+				writeTimeoutTestDeadline, what, want, count())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// waitForStall returns the counter's value once two consecutive samples agree.
+func waitForStall(t *testing.T, what string, count func() int) int {
+	t.Helper()
+	const sampleInterval = 100 * time.Millisecond
+	deadline := time.Now().Add(writeTimeoutTestDeadline)
+	previous := -1
+	for {
+		time.Sleep(sampleInterval)
+		current := count()
+		if current == previous {
+			return current
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s still advancing after %s (%d then %d)", what, writeTimeoutTestDeadline, previous, current)
+		}
+		previous = current
+	}
+}
+
+func TestServerWriteTimeoutEndsConnectionBlockedInWrite(t *testing.T) {
+	channel := "test"
+	rec := &traceRecorder{}
+	server := newWriteTimeoutServer(rec, 200*time.Millisecond)
+	defer server.Close()
+	httpServer := httptest.NewServer(server.Handler(channel))
+	defer httpServer.Close()
+
+	conn := unreadSSEConn(t, httpServer.URL)
+	defer resetConn(t, conn)
+
+	waitForAtLeast(t, "the subscriber to be added", 1, func() int { return len(rec.snapshotAdded()) })
+	publishBlockingEvents(server, channel)
+
+	waitForAtLeast(t, "the handler to exit", 1, func() int { return len(rec.snapshotRemoved()) })
+	removed := rec.snapshotRemoved()
+	assert.Equal(t, ReasonWriteError, removed[0].Reason)
+
+	writeErrors := rec.snapshotWriteErrors()
+	require.Len(t, writeErrors, 1)
+	assert.True(t, errors.Is(writeErrors[0].Err, os.ErrDeadlineExceeded),
+		"expected a deadline error, got %v", writeErrors[0].Err)
+}
+
+func TestServerWithoutWriteTimeoutStaysBlockedInWrite(t *testing.T) {
+	channel := "test"
+	rec := &traceRecorder{}
+	server := newWriteTimeoutServer(rec, 0)
+	defer server.Close()
+	httpServer := httptest.NewServer(server.Handler(channel))
+	defer httpServer.Close()
+
+	conn := unreadSSEConn(t, httpServer.URL)
+	defer resetConn(t, conn)
+
+	waitForAtLeast(t, "the subscriber to be added", 1, func() int { return len(rec.snapshotAdded()) })
+	publishBlockingEvents(server, channel)
+	waitForAtLeast(t, "the first event to be sent", 1, func() int { return len(rec.snapshotEventsSent()) })
+	stalled := waitForStall(t, "events sent", func() int { return len(rec.snapshotEventsSent()) })
+	assert.Less(t, stalled, blockingEventCount, "the whole payload fit in the socket buffers")
+
+	time.Sleep(writeTimeoutTestDeadline / 2)
+	assert.Empty(t, rec.snapshotRemoved(), "handler exited even though no write deadline was set")
+	assert.Equal(t, stalled, len(rec.snapshotEventsSent()), "handler resumed writing")
+}
+
+func TestServerWriteTimeoutDoesNotAffectClientThatKeepsReading(t *testing.T) {
+	channel := "test"
+	rec := &traceRecorder{}
+	const writeTimeout = 100 * time.Millisecond
+	server := newWriteTimeoutServer(rec, writeTimeout)
+	defer server.Close()
+	httpServer := httptest.NewServer(server.Handler(channel))
+	defer httpServer.Close()
+
+	resp, err := http.Get(httpServer.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	reader := newSSEReader(t, resp.Body)
+
+	// Gaps exceed WriteTimeout, so a deadline left armed between writes would end this stream.
+	for i := 0; i < 4; i++ {
+		time.Sleep(writeTimeout + 50*time.Millisecond)
+		want := fmt.Sprintf("event-%d", i)
+		server.Publish([]string{channel}, &publication{id: strconv.Itoa(i), data: want})
+		reader.waitFor(t, want)
+	}
+	assert.Empty(t, rec.snapshotWriteErrors())
+	assert.Empty(t, rec.snapshotRemoved())
+}
+
+// A ResponseWriter that ResponseController cannot unwrap must still work with WriteTimeout set.
+func TestServerWriteTimeoutIgnoredWhenResponseWriterHasNoDeadline(t *testing.T) {
+	channel := "test"
+	rec := &traceRecorder{}
+	server := NewServer()
+	server.WriteTimeout = 10 * time.Millisecond
+	server.Trace = rec.trace()
+	defer server.Close()
+
+	writer := &traceTestWriter{delay: 50 * time.Millisecond}
+	cancel, done := startTraceHandler(server, channel, writer, nil)
+	defer func() {
+		cancel()
+		waitClosed(t, done)
+	}()
+	require.Eventually(t, func() bool {
+		return len(rec.snapshotAdded()) == 1
+	}, writeTimeoutTestDeadline, 10*time.Millisecond)
+
+	<-server.PublishWithAcknowledgment([]string{channel}, &publication{id: "1", data: "hello"})
+	require.Eventually(t, func() bool {
+		return len(rec.snapshotEventsSent()) == 1
+	}, writeTimeoutTestDeadline, 10*time.Millisecond)
+
+	assert.Empty(t, rec.snapshotWriteErrors())
+	assert.Empty(t, rec.snapshotRemoved())
+	assert.True(t, writer.contains("data: hello"))
+}
