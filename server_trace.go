@@ -92,8 +92,10 @@ type ServerTrace struct {
 	// may be an event or a comment; both are reported here.
 	EventDiscarded func(context.Context, EventDiscardedInfo)
 
-	// WriteError is called when encoding or writing an event to a subscriber's
-	// connection fails. The subscriber is removed after this callback.
+	// WriteError is called when encoding, writing, or flushing to a subscriber's
+	// connection fails. The subscriber is removed after this callback. If the
+	// response headers cannot be sent, the subscriber was never added, so no
+	// SubscriberAdded or SubscriberRemoved accompanies this callback.
 	WriteError func(context.Context, WriteErrorInfo)
 
 	// ReplayStarted is called when a subscriber begins draining a batch of
