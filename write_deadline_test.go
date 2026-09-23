@@ -1,9 +1,11 @@
 package eventsource
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -22,6 +24,18 @@ type deadlineRecorder struct {
 	setErr    error
 	clearErr  error
 	flushErr  error
+	onWrite   func([]byte)
+}
+
+func (w *deadlineRecorder) Write(p []byte) (int, error) {
+	if w.onWrite != nil {
+		w.onWrite(p)
+	}
+	return w.ResponseRecorder.Write(p)
+}
+
+func (w *deadlineRecorder) WriteString(s string) (int, error) {
+	return w.Write([]byte(s))
 }
 
 func newDeadlineRecorder() *deadlineRecorder {
@@ -130,8 +144,9 @@ func TestServerWriteTimeoutArmsOncePerEvent(t *testing.T) {
 	cancel()
 	waitClosed(t, done)
 
+	// The last call is the deadline left armed for net/http's trailing flush.
 	deadlines := w.snapshotDeadlines()
-	assert.Len(t, deadlines, 2*(1+len(rec.snapshotEventsSent())))
+	assert.Len(t, deadlines, 2*(1+len(rec.snapshotEventsSent()))+1)
 	for i, d := range deadlines {
 		assert.Equal(t, i%2 == 1, d.IsZero(), "call %d", i)
 	}
@@ -155,12 +170,37 @@ func TestServerHeaderFlushErrorEndsHandlerBeforeRegistration(t *testing.T) {
 	assert.Empty(t, rec.snapshotAdded())
 }
 
+// orderTrace wraps rec's trace to also record the order of WriteError and ReplayFinished.
+func orderTrace(rec *traceRecorder) (*ServerTrace, func() []string) {
+	var mu sync.Mutex
+	var order []string
+	trace := rec.trace()
+	recordWriteError, recordReplayFinished := trace.WriteError, trace.ReplayFinished
+	trace.WriteError = func(ctx context.Context, info WriteErrorInfo) {
+		recordWriteError(ctx, info)
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, "WriteError")
+	}
+	trace.ReplayFinished = func(ctx context.Context, info ReplayFinishedInfo) {
+		recordReplayFinished(ctx, info)
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, "ReplayFinished")
+	}
+	return trace, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), order...)
+	}
+}
+
 func TestServerFailedReplayFlushAbortsBatch(t *testing.T) {
 	channel := "test"
 	rec := &traceRecorder{}
 	w := newDeadlineRecorder()
 	flushErr := errors.New("gone")
-	trace := rec.trace()
+	trace, order := orderTrace(rec)
 	recordAdded := trace.SubscriberAdded
 	// Fires after the header flush and before the replay, so only the end-of-batch flush fails.
 	trace.SubscriberAdded = func(ctx context.Context, info SubscriberAddedInfo) {
@@ -183,9 +223,53 @@ func TestServerFailedReplayFlushAbortsBatch(t *testing.T) {
 	writeErrors := rec.snapshotWriteErrors()
 	require.Len(t, writeErrors, 1)
 	assert.True(t, errors.Is(writeErrors[0].Err, flushErr), "got %v", writeErrors[0].Err)
+	assert.Equal(t, []string{"WriteError", "ReplayFinished"}, order())
 	removed := rec.snapshotRemoved()
 	require.Len(t, removed, 1)
 	assert.Equal(t, ReasonWriteError, removed[0].Reason)
+}
+
+// The request is cancelled while the replayed event is written, so the read loop's select
+// races the batch-end sentinel against the cancellation. Whichever path wins, the failed
+// end-of-batch flush must abort the batch.
+func TestServerFailedReplayFlushAbortsBatchWhenDisconnectRacesBatchEnd(t *testing.T) {
+	for i := 0; i < 40; i++ {
+		channel := "test"
+		rec := &traceRecorder{}
+		w := newDeadlineRecorder()
+		trace, order := orderTrace(rec)
+		recordAdded := trace.SubscriberAdded
+		trace.SubscriberAdded = func(ctx context.Context, info SubscriberAddedInfo) {
+			recordAdded(ctx, info)
+			w.failFlushes(errors.New("gone"))
+		}
+		server := NewServer()
+		server.Trace = trace
+		server.ReplayAll = true
+		server.Register(channel, &testServerRepository{})
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		ctx, cancel := context.WithCancel(req.Context())
+		w.onWrite = func(p []byte) {
+			if bytes.Contains(p, []byte("replayed-from-start")) {
+				// Give the Server time to close the batch, so both select cases are ready.
+				time.Sleep(20 * time.Millisecond)
+				cancel()
+			}
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			server.Handler(channel)(w, req.WithContext(ctx))
+		}()
+		waitClosed(t, done)
+		server.Close()
+
+		finished := rec.snapshotReplayFinished()
+		require.Len(t, finished, 1, "iteration %d", i)
+		require.True(t, finished[0].Aborted, "iteration %d: batch reported complete though its flush failed", i)
+		require.Equal(t, []string{"WriteError", "ReplayFinished"}, order(), "iteration %d", i)
+	}
 }
 
 // A subscriber registers only after SubscriberAdded fires, so an event published in between

@@ -69,6 +69,8 @@ type Server struct {
 	// It replaces the connection's write deadline, so http.Server.WriteTimeout stops applying
 	// after the first write. Requires a ResponseWriter that supports
 	// http.ResponseController.SetWriteDeadline; otherwise writes proceed without a deadline.
+	// On HTTP/2 a peer that stops reading the whole connection can keep the stream reset from
+	// being sent, so also set http.Server.HTTP2.WriteByteTimeout.
 	WriteTimeout time.Duration
 	// Logger, when set, receives DEBUG lines for subscriber lifecycle events
 	// (add, remove, replay drain), a WARN line when a slow subscriber is
@@ -245,8 +247,12 @@ func (hs *handlerState) reportExit() {
 	}
 	if hs.readBatchCh != nil && !replayAborted {
 		// The completed batch still gets its end-of-batch flush, matching the
-		// read loop's sentinel path and the DrainDuration contract.
-		_ = hs.writeUnit(nil, true)
+		// read loop's sentinel path and the DrainDuration contract. A failed
+		// flush means the tail never reached the client, as in finishReplayBatch.
+		if err := hs.writeUnit(nil, true); err != nil {
+			hs.reportWriteError(err)
+			replayAborted = true
+		}
 	}
 	if hs.delayedEvent != nil {
 		// An event was still parked awaiting its jitter delay when the
@@ -261,6 +267,9 @@ func (hs *handlerState) reportExit() {
 		hs.srv.traceReplayFinished(hs.ctx, hs.sub, hs.replayCount, hs.replayBytes,
 			sinceOrZero(hs.replayStart), replayAborted)
 	}
+	// Bound net/http's trailing flush after the handler returns; net/http clears the
+	// deadline once the response is finished.
+	_ = hs.deadline.arm()
 }
 
 // cleanup is the half of the teardown that must never be skipped: resolving

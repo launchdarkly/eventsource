@@ -258,8 +258,8 @@ func newHTTP2Server(t *testing.T, handler http.Handler) *httptest.Server {
 	return httpServer
 }
 
-// On HTTP/2 an expired deadline resets the stream rather than failing the write with
-// os.ErrDeadlineExceeded, so only the exit reason is asserted.
+// On HTTP/2 an expired deadline resets the stream, and the blocked write still fails with
+// os.ErrDeadlineExceeded.
 func TestServerWriteTimeoutEndsHTTP2StreamBlockedInWrite(t *testing.T) {
 	channel := "test"
 	rec := &traceRecorder{}
@@ -279,7 +279,10 @@ func TestServerWriteTimeoutEndsHTTP2StreamBlockedInWrite(t *testing.T) {
 
 	waitForAtLeast(t, "the handler to exit", 1, func() int { return len(rec.snapshotRemoved()) })
 	assert.Equal(t, ReasonWriteError, rec.snapshotRemoved()[0].Reason)
-	require.Len(t, rec.snapshotWriteErrors(), 1)
+	writeErrors := rec.snapshotWriteErrors()
+	require.Len(t, writeErrors, 1)
+	assert.True(t, errors.Is(writeErrors[0].Err, os.ErrDeadlineExceeded),
+		"expected a deadline error, got %v", writeErrors[0].Err)
 }
 
 // A deadline left armed between events would reset an idle HTTP/2 stream.
@@ -306,4 +309,41 @@ func TestServerWriteTimeoutDoesNotAffectHTTP2ClientThatKeepsReading(t *testing.T
 	}
 	assert.Empty(t, rec.snapshotWriteErrors())
 	assert.Empty(t, rec.snapshotRemoved())
+}
+
+// singleEventRepository replays one event, the way ld-relay delivers its initial put.
+type singleEventRepository struct{ ev Event }
+
+func (r singleEventRepository) Replay(string, string) chan Event {
+	out := make(chan Event, 1)
+	out <- r.ev
+	close(out)
+	return out
+}
+
+// Replayed events are written without a flush, so they need their own deadline.
+func TestServerWriteTimeoutEndsReplayBlockedInWrite(t *testing.T) {
+	channel := "test"
+	rec := &traceRecorder{}
+	server := newWriteTimeoutServer(rec, 200*time.Millisecond)
+	server.ReplayAll = true
+	server.Register(channel, singleEventRepository{
+		ev: &publication{id: "1", event: "put", data: strings.Repeat("x", blockingEventSize*blockingEventCount)},
+	})
+	defer server.Close()
+	httpServer := httptest.NewServer(server.Handler(channel))
+	defer httpServer.Close()
+
+	conn := unreadSSEConn(t, httpServer.URL)
+	defer resetConn(t, conn)
+
+	waitForAtLeast(t, "the handler to exit", 1, func() int { return len(rec.snapshotRemoved()) })
+	assert.Equal(t, ReasonWriteError, rec.snapshotRemoved()[0].Reason)
+	writeErrors := rec.snapshotWriteErrors()
+	require.Len(t, writeErrors, 1)
+	assert.True(t, errors.Is(writeErrors[0].Err, os.ErrDeadlineExceeded),
+		"expected a deadline error, got %v", writeErrors[0].Err)
+	finished := rec.snapshotReplayFinished()
+	require.Len(t, finished, 1)
+	assert.True(t, finished[0].Aborted)
 }
