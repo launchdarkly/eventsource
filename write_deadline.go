@@ -21,10 +21,14 @@ func newWriteDeadline(w http.ResponseWriter, timeout time.Duration) *writeDeadli
 	return &writeDeadline{rc: http.NewResponseController(w), timeout: timeout}
 }
 
+func (d *writeDeadline) enabled() bool {
+	return d.timeout > 0 && !d.unsupported
+}
+
 // arm fails only when a ResponseWriter that supports deadlines refuses one, since carrying
 // on would leave the write unbounded.
 func (d *writeDeadline) arm() error {
-	if d.timeout <= 0 || d.unsupported {
+	if !d.enabled() {
 		return nil
 	}
 	if err := d.rc.SetWriteDeadline(time.Now().Add(d.timeout)); err != nil {

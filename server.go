@@ -66,6 +66,7 @@ type Server struct {
 	// WriteTimeout, if non-zero, bounds writing one event or comment and its flush, one
 	// replayed event, or the flush that ends a replay; exceeding it ends the connection as a
 	// write error. No deadline is armed between writes, so idle long-lived streams are safe.
+	// An Event's fields are read before the deadline starts, so a slow Data does not count.
 	// It replaces the connection's write deadline, so http.Server.WriteTimeout stops applying
 	// after the first write. Requires a ResponseWriter that supports
 	// http.ResponseController.SetWriteDeadline; otherwise writes proceed without a deadline.
@@ -312,6 +313,10 @@ func (hs *handlerState) reportWriteError(err error) {
 // writeUnit encodes ec (if non-nil) and optionally flushes, under one WriteTimeout deadline.
 // The deadline is left armed on error so net/http's trailing writes fail fast too.
 func (hs *handlerState) writeUnit(ec eventOrComment, flush bool) error {
+	if ev, ok := ec.(Event); ok && hs.deadline.enabled() {
+		// The deadline bounds the client, not the Event: a lazily computed Data() runs first.
+		ec = &publication{id: ev.Id(), event: ev.Event(), data: ev.Data()}
+	}
 	if err := hs.deadline.arm(); err != nil {
 		return err
 	}

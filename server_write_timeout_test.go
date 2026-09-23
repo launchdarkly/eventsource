@@ -347,3 +347,31 @@ func TestServerWriteTimeoutEndsReplayBlockedInWrite(t *testing.T) {
 	require.Len(t, finished, 1)
 	assert.True(t, finished[0].Aborted)
 }
+
+// slowEvent computes its Data lazily, like ld-relay's put, and takes longer than WriteTimeout.
+type slowEvent struct{ delay time.Duration }
+
+func (slowEvent) Id() string    { return "1" } //nolint:revive
+func (slowEvent) Event() string { return "put" }
+func (e slowEvent) Data() string {
+	time.Sleep(e.delay)
+	// Larger than net/http's buffer, so writing it touches the socket after the delay.
+	return strings.Repeat("x", blockingEventSize) + "payload"
+}
+
+func TestServerWriteTimeoutDoesNotCountEventDataComputation(t *testing.T) {
+	channel := "test"
+	rec := &traceRecorder{}
+	server := newWriteTimeoutServer(rec, 100*time.Millisecond)
+	server.ReplayAll = true
+	server.Register(channel, singleEventRepository{ev: slowEvent{delay: 300 * time.Millisecond}})
+	defer server.Close()
+	httpServer := httptest.NewServer(server.Handler(channel))
+	defer httpServer.Close()
+
+	resp, err := http.Get(httpServer.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	newSSEReader(t, resp.Body).waitFor(t, "payload")
+	assert.Empty(t, rec.snapshotWriteErrors())
+}
