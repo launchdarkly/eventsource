@@ -2,6 +2,8 @@ package eventsource
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -27,7 +29,7 @@ const blockingEventCount = 200
 
 // unreadSSEConn sends a valid SSE request, consumes the response headers, then never reads
 // again. Callers must resetConn it before httptest.Server.Close, which waits on handlers.
-func unreadSSEConn(t *testing.T, url string) *net.TCPConn {
+func unreadSSEConn(t *testing.T, url string, headers ...string) *net.TCPConn {
 	t.Helper()
 	u, err := neturl.Parse(url)
 	require.NoError(t, err)
@@ -36,7 +38,11 @@ func unreadSSEConn(t *testing.T, url string) *net.TCPConn {
 	conn, ok := c.(*net.TCPConn)
 	require.True(t, ok)
 	require.NoError(t, conn.SetReadBuffer(4096))
-	_, err = fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: %s\r\nAccept: text/event-stream\r\n\r\n", u.Host)
+	var extra string
+	for _, h := range headers {
+		extra += h + "\r\n"
+	}
+	_, err = fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: %s\r\nAccept: text/event-stream\r\n%s\r\n", u.Host, extra)
 	require.NoError(t, err)
 
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(writeTimeoutTestDeadline)))
@@ -60,7 +66,18 @@ func resetConn(t *testing.T, conn *net.TCPConn) {
 }
 
 func publishBlockingEvents(server *Server, channel string) {
-	data := strings.Repeat("x", blockingEventSize)
+	publishEvents(server, channel, strings.Repeat("x", blockingEventSize))
+}
+
+// Random bytes survive gzip, so a compressed stream still fills the socket buffers.
+func publishIncompressibleEvents(t *testing.T, server *Server, channel string) {
+	raw := make([]byte, blockingEventSize)
+	_, err := rand.Read(raw)
+	require.NoError(t, err)
+	publishEvents(server, channel, base64.StdEncoding.EncodeToString(raw))
+}
+
+func publishEvents(server *Server, channel, data string) {
 	for i := 0; i < blockingEventCount; i++ {
 		server.Publish([]string{channel}, &publication{id: strconv.Itoa(i), data: data})
 	}
@@ -90,20 +107,27 @@ func waitForAtLeast(t *testing.T, what string, want int, count func() int) {
 	}
 }
 
-// waitForStall returns the counter's value once two consecutive samples agree.
+// waitForStall returns the counter's value once it has held still for stallSamples samples,
+// long enough that a descheduled handler is not mistaken for a blocked one.
 func waitForStall(t *testing.T, what string, count func() int) int {
 	t.Helper()
 	const sampleInterval = 100 * time.Millisecond
-	deadline := time.Now().Add(writeTimeoutTestDeadline)
-	previous := -1
+	const stallSamples = 5
+	deadline := time.Now().Add(2 * writeTimeoutTestDeadline)
+	previous, unchanged := -1, 0
 	for {
 		time.Sleep(sampleInterval)
 		current := count()
 		if current == previous {
-			return current
+			unchanged++
+			if unchanged == stallSamples {
+				return current
+			}
+		} else {
+			unchanged = 0
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%s still advancing after %s (%d then %d)", what, writeTimeoutTestDeadline, previous, current)
+			t.Fatalf("%s still advancing after %s (%d then %d)", what, 2*writeTimeoutTestDeadline, previous, current)
 		}
 		previous = current
 	}
@@ -195,16 +219,91 @@ func TestServerWriteTimeoutIgnoredWhenResponseWriterHasNoDeadline(t *testing.T) 
 		cancel()
 		waitClosed(t, done)
 	}()
-	require.Eventually(t, func() bool {
-		return len(rec.snapshotAdded()) == 1
-	}, writeTimeoutTestDeadline, 10*time.Millisecond)
-
-	<-server.PublishWithAcknowledgment([]string{channel}, &publication{id: "1", data: "hello"})
-	require.Eventually(t, func() bool {
-		return len(rec.snapshotEventsSent()) == 1
-	}, writeTimeoutTestDeadline, 10*time.Millisecond)
+	publishUntilSent(t, server, channel, rec, &publication{id: "1", data: "hello"})
 
 	assert.Empty(t, rec.snapshotWriteErrors())
 	assert.Empty(t, rec.snapshotRemoved())
 	assert.True(t, writer.contains("data: hello"))
+}
+
+// ld-relay serves SSE gzipped; the deadline error must survive the gzip writer.
+func TestServerWriteTimeoutEndsGzipConnectionBlockedInWrite(t *testing.T) {
+	channel := "test"
+	rec := &traceRecorder{}
+	server := newWriteTimeoutServer(rec, 200*time.Millisecond)
+	server.Gzip = true
+	defer server.Close()
+	httpServer := httptest.NewServer(server.Handler(channel))
+	defer httpServer.Close()
+
+	conn := unreadSSEConn(t, httpServer.URL, "Accept-Encoding: gzip")
+	defer resetConn(t, conn)
+
+	waitForAtLeast(t, "the subscriber to be added", 1, func() int { return len(rec.snapshotAdded()) })
+	publishIncompressibleEvents(t, server, channel)
+
+	waitForAtLeast(t, "the handler to exit", 1, func() int { return len(rec.snapshotRemoved()) })
+	assert.Equal(t, ReasonWriteError, rec.snapshotRemoved()[0].Reason)
+	writeErrors := rec.snapshotWriteErrors()
+	require.Len(t, writeErrors, 1)
+	assert.True(t, errors.Is(writeErrors[0].Err, os.ErrDeadlineExceeded),
+		"expected a deadline error, got %v", writeErrors[0].Err)
+}
+
+func newHTTP2Server(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	httpServer := httptest.NewUnstartedServer(handler)
+	httpServer.EnableHTTP2 = true
+	httpServer.StartTLS()
+	return httpServer
+}
+
+// On HTTP/2 an expired deadline resets the stream rather than failing the write with
+// os.ErrDeadlineExceeded, so only the exit reason is asserted.
+func TestServerWriteTimeoutEndsHTTP2StreamBlockedInWrite(t *testing.T) {
+	channel := "test"
+	rec := &traceRecorder{}
+	server := newWriteTimeoutServer(rec, 200*time.Millisecond)
+	defer server.Close()
+	httpServer := newHTTP2Server(t, server.Handler(channel))
+	defer httpServer.Close()
+
+	resp, err := httpServer.Client().Get(httpServer.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, 2, resp.ProtoMajor)
+
+	// The body is never read, so the client's flow-control window fills and the handler blocks.
+	waitForAtLeast(t, "the subscriber to be added", 1, func() int { return len(rec.snapshotAdded()) })
+	publishBlockingEvents(server, channel)
+
+	waitForAtLeast(t, "the handler to exit", 1, func() int { return len(rec.snapshotRemoved()) })
+	assert.Equal(t, ReasonWriteError, rec.snapshotRemoved()[0].Reason)
+	require.Len(t, rec.snapshotWriteErrors(), 1)
+}
+
+// A deadline left armed between events would reset an idle HTTP/2 stream.
+func TestServerWriteTimeoutDoesNotAffectHTTP2ClientThatKeepsReading(t *testing.T) {
+	channel := "test"
+	rec := &traceRecorder{}
+	const writeTimeout = 100 * time.Millisecond
+	server := newWriteTimeoutServer(rec, writeTimeout)
+	defer server.Close()
+	httpServer := newHTTP2Server(t, server.Handler(channel))
+	defer httpServer.Close()
+
+	resp, err := httpServer.Client().Get(httpServer.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, 2, resp.ProtoMajor)
+	reader := newSSEReader(t, resp.Body)
+
+	for i := 0; i < 4; i++ {
+		time.Sleep(writeTimeout + 50*time.Millisecond)
+		want := fmt.Sprintf("event-%d", i)
+		server.Publish([]string{channel}, &publication{id: strconv.Itoa(i), data: want})
+		reader.waitFor(t, want)
+	}
+	assert.Empty(t, rec.snapshotWriteErrors())
+	assert.Empty(t, rec.snapshotRemoved())
 }
