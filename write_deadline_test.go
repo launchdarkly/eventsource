@@ -152,6 +152,33 @@ func TestServerWriteTimeoutArmsOncePerEvent(t *testing.T) {
 	}
 }
 
+// On HTTP/2 no deadline is left armed at exit, because it would fire on a closed stream.
+func TestServerWriteTimeoutLeavesNoDeadlineAtExitOnHTTP2(t *testing.T) {
+	channel := "test"
+	rec := &traceRecorder{}
+	server := NewServer()
+	server.WriteTimeout = time.Minute
+	server.Trace = rec.trace()
+	defer server.Close()
+
+	w := newDeadlineRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Proto, req.ProtoMajor, req.ProtoMinor = "HTTP/2.0", 2, 0
+	ctx, cancel := context.WithCancel(req.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.Handler(channel)(w, req.WithContext(ctx))
+	}()
+	publishUntilSent(t, server, channel, rec, &publication{id: "1", data: "hello"})
+	cancel()
+	waitClosed(t, done)
+
+	deadlines := w.snapshotDeadlines()
+	require.NotEmpty(t, deadlines)
+	assert.True(t, deadlines[len(deadlines)-1].IsZero(), "a deadline was left armed at exit")
+}
+
 func TestServerHeaderFlushErrorEndsHandlerBeforeRegistration(t *testing.T) {
 	channel := "test"
 	rec := &traceRecorder{}

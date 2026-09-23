@@ -167,6 +167,7 @@ type handlerState struct {
 	channel   string
 	eventCh   chan eventOrComment
 	deadline  *writeDeadline
+	http1     bool
 	enc       *Encoder
 	connStart time.Time
 
@@ -269,8 +270,11 @@ func (hs *handlerState) reportExit() {
 			sinceOrZero(hs.replayStart), replayAborted)
 	}
 	// Bound net/http's trailing flush after the handler returns; net/http clears the
-	// deadline once the response is finished.
-	_ = hs.deadline.arm()
+	// deadline once the response is finished. HTTP/2 is skipped: a deadline on a stream the
+	// client already closed would later send it a stray reset.
+	if hs.http1 {
+		_ = hs.deadline.arm()
+	}
 }
 
 // cleanup is the half of the teardown that must never be skipped: resolving
@@ -415,6 +419,7 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 			channel:  channel,
 			eventCh:  eventCh,
 			deadline: newWriteDeadline(w, srv.WriteTimeout),
+			http1:    req.ProtoMajor == 1,
 			// connStart is meaningful only when something is observing the
 			// connection; beginSubscription returns the zero time otherwise,
 			// which sinceOrZero maps to a zero duration.
