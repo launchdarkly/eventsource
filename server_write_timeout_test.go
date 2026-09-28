@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -92,6 +93,28 @@ func newWriteTimeoutServer(rec *traceRecorder, writeTimeout time.Duration) *Serv
 	return server
 }
 
+// registrationSignal is a Repository whose first Replay call marks the subscriber registered.
+type registrationSignal struct {
+	once sync.Once
+	ch   chan struct{}
+}
+
+func (r *registrationSignal) Replay(string, string) chan Event {
+	r.once.Do(func() { close(r.ch) })
+	out := make(chan Event)
+	close(out)
+	return out
+}
+
+// awaitRegistration returns a channel closed once channel's first subscriber is registered.
+// SubscriberAdded fires before registration, so an event published on it can reach nobody.
+func awaitRegistration(server *Server, channel string) <-chan struct{} {
+	signal := &registrationSignal{ch: make(chan struct{})}
+	server.ReplayAll = true
+	server.Register(channel, signal)
+	return signal.ch
+}
+
 func waitForAtLeast(t *testing.T, what string, want int, count func() int) {
 	t.Helper()
 	deadline := time.Now().Add(writeTimeoutTestDeadline)
@@ -137,6 +160,7 @@ func TestServerWriteTimeoutEndsConnectionBlockedInWrite(t *testing.T) {
 	channel := "test"
 	rec := &traceRecorder{}
 	server := newWriteTimeoutServer(rec, 200*time.Millisecond)
+	registered := awaitRegistration(server, channel)
 	defer server.Close()
 	httpServer := httptest.NewServer(server.Handler(channel))
 	defer httpServer.Close()
@@ -144,7 +168,7 @@ func TestServerWriteTimeoutEndsConnectionBlockedInWrite(t *testing.T) {
 	conn := unreadSSEConn(t, httpServer.URL)
 	defer resetConn(t, conn)
 
-	waitForAtLeast(t, "the subscriber to be added", 1, func() int { return len(rec.snapshotAdded()) })
+	waitClosed(t, registered)
 	publishBlockingEvents(server, channel)
 
 	waitForAtLeast(t, "the handler to exit", 1, func() int { return len(rec.snapshotRemoved()) })
@@ -161,6 +185,7 @@ func TestServerWithoutWriteTimeoutStaysBlockedInWrite(t *testing.T) {
 	channel := "test"
 	rec := &traceRecorder{}
 	server := newWriteTimeoutServer(rec, 0)
+	registered := awaitRegistration(server, channel)
 	defer server.Close()
 	httpServer := httptest.NewServer(server.Handler(channel))
 	defer httpServer.Close()
@@ -168,7 +193,7 @@ func TestServerWithoutWriteTimeoutStaysBlockedInWrite(t *testing.T) {
 	conn := unreadSSEConn(t, httpServer.URL)
 	defer resetConn(t, conn)
 
-	waitForAtLeast(t, "the subscriber to be added", 1, func() int { return len(rec.snapshotAdded()) })
+	waitClosed(t, registered)
 	publishBlockingEvents(server, channel)
 	waitForAtLeast(t, "the first event to be sent", 1, func() int { return len(rec.snapshotEventsSent()) })
 	stalled := waitForStall(t, "events sent", func() int { return len(rec.snapshotEventsSent()) })
@@ -184,6 +209,7 @@ func TestServerWriteTimeoutDoesNotAffectClientThatKeepsReading(t *testing.T) {
 	rec := &traceRecorder{}
 	const writeTimeout = 100 * time.Millisecond
 	server := newWriteTimeoutServer(rec, writeTimeout)
+	registered := awaitRegistration(server, channel)
 	defer server.Close()
 	httpServer := httptest.NewServer(server.Handler(channel))
 	defer httpServer.Close()
@@ -192,6 +218,7 @@ func TestServerWriteTimeoutDoesNotAffectClientThatKeepsReading(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	reader := newSSEReader(t, resp.Body)
+	waitClosed(t, registered)
 
 	// Gaps exceed WriteTimeout, so a deadline left armed between writes would end this stream.
 	for i := 0; i < 4; i++ {
@@ -232,6 +259,7 @@ func TestServerWriteTimeoutEndsGzipConnectionBlockedInWrite(t *testing.T) {
 	rec := &traceRecorder{}
 	server := newWriteTimeoutServer(rec, 200*time.Millisecond)
 	server.Gzip = true
+	registered := awaitRegistration(server, channel)
 	defer server.Close()
 	httpServer := httptest.NewServer(server.Handler(channel))
 	defer httpServer.Close()
@@ -239,7 +267,7 @@ func TestServerWriteTimeoutEndsGzipConnectionBlockedInWrite(t *testing.T) {
 	conn := unreadSSEConn(t, httpServer.URL, "Accept-Encoding: gzip")
 	defer resetConn(t, conn)
 
-	waitForAtLeast(t, "the subscriber to be added", 1, func() int { return len(rec.snapshotAdded()) })
+	waitClosed(t, registered)
 	publishIncompressibleEvents(t, server, channel)
 
 	waitForAtLeast(t, "the handler to exit", 1, func() int { return len(rec.snapshotRemoved()) })
@@ -264,6 +292,7 @@ func TestServerWriteTimeoutEndsHTTP2StreamBlockedInWrite(t *testing.T) {
 	channel := "test"
 	rec := &traceRecorder{}
 	server := newWriteTimeoutServer(rec, 200*time.Millisecond)
+	registered := awaitRegistration(server, channel)
 	defer server.Close()
 	httpServer := newHTTP2Server(t, server.Handler(channel))
 	defer httpServer.Close()
@@ -274,7 +303,7 @@ func TestServerWriteTimeoutEndsHTTP2StreamBlockedInWrite(t *testing.T) {
 	require.Equal(t, 2, resp.ProtoMajor)
 
 	// The body is never read, so the client's flow-control window fills and the handler blocks.
-	waitForAtLeast(t, "the subscriber to be added", 1, func() int { return len(rec.snapshotAdded()) })
+	waitClosed(t, registered)
 	publishBlockingEvents(server, channel)
 
 	waitForAtLeast(t, "the handler to exit", 1, func() int { return len(rec.snapshotRemoved()) })
@@ -291,6 +320,7 @@ func TestServerWriteTimeoutDoesNotAffectHTTP2ClientThatKeepsReading(t *testing.T
 	rec := &traceRecorder{}
 	const writeTimeout = 100 * time.Millisecond
 	server := newWriteTimeoutServer(rec, writeTimeout)
+	registered := awaitRegistration(server, channel)
 	defer server.Close()
 	httpServer := newHTTP2Server(t, server.Handler(channel))
 	defer httpServer.Close()
@@ -300,6 +330,7 @@ func TestServerWriteTimeoutDoesNotAffectHTTP2ClientThatKeepsReading(t *testing.T
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, 2, resp.ProtoMajor)
 	reader := newSSEReader(t, resp.Body)
+	waitClosed(t, registered)
 
 	for i := 0; i < 4; i++ {
 		time.Sleep(writeTimeout + 50*time.Millisecond)
