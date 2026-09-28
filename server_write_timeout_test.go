@@ -59,6 +59,19 @@ func unreadSSEConn(t *testing.T, url string, headers ...string) *net.TCPConn {
 	return conn
 }
 
+// newSmallSendBufferServer shrinks each connection's send buffer, so a client that stops
+// reading blocks the handler after little output, even when that output is slow to produce.
+func newSmallSendBufferServer(handler http.Handler) *httptest.Server {
+	httpServer := httptest.NewUnstartedServer(handler)
+	httpServer.Config.ConnState = func(c net.Conn, state http.ConnState) {
+		if tc, ok := c.(*net.TCPConn); ok && state == http.StateNew {
+			_ = tc.SetWriteBuffer(4096)
+		}
+	}
+	httpServer.Start()
+	return httpServer
+}
+
 // resetConn sends RST so a handler parked in a write to this connection is released.
 func resetConn(t *testing.T, conn *net.TCPConn) {
 	t.Helper()
@@ -253,7 +266,8 @@ func TestServerWriteTimeoutIgnoredWhenResponseWriterHasNoDeadline(t *testing.T) 
 	assert.True(t, writer.contains("data: hello"))
 }
 
-// ld-relay serves SSE gzipped; the deadline error must survive the gzip writer.
+// ld-relay serves SSE gzipped; the deadline error must survive the gzip writer. Compressing
+// megabytes under -race outlasts the wait on slow runners, so the send buffer is kept small.
 func TestServerWriteTimeoutEndsGzipConnectionBlockedInWrite(t *testing.T) {
 	channel := "test"
 	rec := &traceRecorder{}
@@ -261,7 +275,7 @@ func TestServerWriteTimeoutEndsGzipConnectionBlockedInWrite(t *testing.T) {
 	server.Gzip = true
 	registered := awaitRegistration(server, channel)
 	defer server.Close()
-	httpServer := httptest.NewServer(server.Handler(channel))
+	httpServer := newSmallSendBufferServer(server.Handler(channel))
 	defer httpServer.Close()
 
 	conn := unreadSSEConn(t, httpServer.URL, "Accept-Encoding: gzip")
