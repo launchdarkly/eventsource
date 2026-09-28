@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/launchdarkly/eventsource"
@@ -29,9 +30,26 @@ func TimePublisher(srv *eventsource.Server) {
 	}
 }
 
+// subscribedSignal is a Repository with nothing to replay. The Server asks it for a replay
+// only after it registers a subscriber, so the call shows that published events will arrive.
+type subscribedSignal struct {
+	once sync.Once
+	ch   chan struct{}
+}
+
+func (s *subscribedSignal) Replay(channel, id string) chan eventsource.Event {
+	s.once.Do(func() { close(s.ch) })
+	out := make(chan eventsource.Event)
+	close(out)
+	return out
+}
+
 func ExampleEvent() {
 	srv := eventsource.NewServer()
 	srv.Gzip = true
+	srv.ReplayAll = true
+	subscribed := &subscribedSignal{ch: make(chan struct{})}
+	srv.Register("time", subscribed)
 	defer srv.Close()
 	l, err := net.Listen("tcp", ":8080")
 	if err != nil {
@@ -40,11 +58,13 @@ func ExampleEvent() {
 	defer l.Close()
 	http.HandleFunc("/time", srv.Handler("time"))
 	go http.Serve(l, nil)
-	go TimePublisher(srv)
 	stream, err := eventsource.Subscribe("http://127.0.0.1:8080/time", "")
 	if err != nil {
 		return
 	}
+	// Events published before the Server registers the subscriber reach nobody.
+	<-subscribed.ch
+	go TimePublisher(srv)
 	for range TICK_COUNT {
 		ev := <-stream.Events
 		fmt.Println(ev.Id(), ev.Event(), ev.Data())
