@@ -63,6 +63,24 @@ type Server struct {
 	BufferSize  int           // How many messages do we let the client get behind before disconnecting
 	Gzip        bool          // Enable compression if client can accept it
 	MaxConnTime time.Duration // If non-zero, HTTP connections will be automatically closed after this time
+	// WriteDeadline, when set, bounds how long a subscriber has to accept each unit of output.
+	// See WriteDeadlinePolicy for what a unit is. When a deadline expires, the connection ends
+	// with a write error. No deadline is set between units, so an idle stream never times out.
+	// When it is nil, which is the default, writes have no deadline.
+	//
+	// When it is set:
+	//   - A failed flush is a write error. Without a policy, flush errors are ignored.
+	//   - If the response headers cannot be sent, the handler exits before it adds the subscriber.
+	//   - On HTTP/1, the handler starts a unit with no bytes as it exits. This bounds the final
+	//     flush that net/http does after the handler returns.
+	//   - The Server clears the connection's write deadline after each unit, so
+	//     http.Server.WriteTimeout stops applying after the first unit.
+	//
+	// The deadline requires a ResponseWriter that supports http.ResponseController's
+	// SetWriteDeadline. If it does not, writes on that connection have no deadline, and the
+	// Logger, if set, receives a WARN line. On HTTP/2, a peer that stops reading the whole
+	// connection can prevent the stream reset, so also set http.Server.HTTP2.WriteByteTimeout.
+	WriteDeadline WriteDeadlinePolicy
 	// Logger, when set, receives DEBUG lines for subscriber lifecycle events
 	// (add, remove, replay drain), a WARN line when a slow subscriber is
 	// dropped, and write errors. Lines identify connections by an opaque
@@ -156,8 +174,7 @@ type handlerState struct {
 	ctx       context.Context
 	channel   string
 	eventCh   chan eventOrComment
-	flusher   http.Flusher
-	enc       *Encoder
+	out       unitWriter
 	connStart time.Time
 
 	// exitReason is set at each point the read loop can exit, so that
@@ -238,8 +255,11 @@ func (hs *handlerState) reportExit() {
 	}
 	if hs.readBatchCh != nil && !replayAborted {
 		// The completed batch still gets its end-of-batch flush, matching the
-		// read loop's sentinel path and the DrainDuration contract.
-		hs.flusher.Flush()
+		// read loop's sentinel path and the DrainDuration contract. If the flush
+		// fails, the tail of the batch did not reach the client.
+		if err := hs.out.write(nil, true); err != nil {
+			replayAborted = true
+		}
 	}
 	if hs.delayedEvent != nil {
 		// An event was still parked awaiting its jitter delay when the
@@ -283,16 +303,36 @@ func (hs *handlerState) cleanup() {
 	}
 }
 
+// reportWriteError records a failed write as the reason the handler exits.
+func (hs *handlerState) reportWriteError(err error) {
+	// No unsubscribe here: the deferred cleanup sends it moments later, and
+	// an early send would let run()'s unsubscription path start draining a
+	// mid-drain replay batch underneath the teardown's completion probe.
+	hs.exitReason = ReasonWriteError
+	hs.srv.traceWriteError(hs.ctx, hs.channel, err)
+	if hs.srv.Logger != nil {
+		hs.srv.Logger.Println(err)
+	}
+}
+
+// finishReplayBatch flushes a fully read replay batch and reports it. It returns false if the
+// flush failed, which means that the tail of the batch did not reach the client.
+func (hs *handlerState) finishReplayBatch() bool {
+	err := hs.out.write(nil, true)
+	if err != nil {
+		hs.reportWriteError(err)
+	}
+	hs.readBatchCh = nil
+	// DrainDuration is measured after the flush above, so it accounts for the batch's
+	// single flush rather than excluding it.
+	hs.srv.traceReplayFinished(hs.ctx, hs.sub, hs.replayCount, hs.replayBytes,
+		sinceOrZero(hs.replayStart), err != nil)
+	return err == nil
+}
+
 func (hs *handlerState) writeEventOrComment(ec eventOrComment) bool {
-	if err := hs.enc.Encode(ec); err != nil {
-		// No unsubscribe here: the deferred cleanup sends it moments later, and
-		// an early send would let run()'s unsubscription path start draining a
-		// mid-drain replay batch underneath the teardown's completion probe.
-		hs.exitReason = ReasonWriteError
-		hs.srv.traceWriteError(hs.ctx, hs.channel, err)
-		if hs.srv.Logger != nil {
-			hs.srv.Logger.Println(err)
-		}
+	if err := hs.out.write(ec, false); err != nil {
+		hs.reportWriteError(err)
 		return false // if this happens, we'll end the handler early because something's clearly broken
 	}
 	return true
@@ -300,10 +340,10 @@ func (hs *handlerState) writeEventOrComment(ec eventOrComment) bool {
 
 func (hs *handlerState) writeEventOrCommentAndFlush(ec eventOrComment) bool {
 	return hs.srv.writeTraced(hs.ctx, hs.channel, ec, func() bool {
-		if !hs.writeEventOrComment(ec) {
+		if err := hs.out.write(ec, true); err != nil {
+			hs.reportWriteError(err)
 			return false
 		}
-		hs.flusher.Flush()
 		return true
 	})
 }
@@ -356,17 +396,25 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 			ctx:     ctx,
 			channel: channel,
 			eventCh: eventCh,
-			flusher: w.(http.Flusher),
 			// connStart is meaningful only when something is observing the
 			// connection; beginSubscription returns the zero time otherwise,
 			// which sinceOrZero maps to a zero duration.
 			connStart: srv.beginSubscription(sub),
 		}
-
+		// The Encoder is created before the headers are flushed, so the header flush is a
+		// unit like any other. gzip.NewWriter writes nothing until the first event.
+		hs.out = newUnitWriter(srv, sub, w, req, useGzip)
+		// out.exit is registered first so that it runs last, after all the teardown code,
+		// which can include slow consumer callbacks.
+		defer hs.out.exit()
 		defer hs.cleanup()
 		defer hs.reportExit()
 
-		hs.flusher.Flush()
+		// A client that cannot accept even the headers is never added.
+		if err := hs.out.write(nil, true); err != nil {
+			hs.reportWriteError(err)
+			return
+		}
 		// reportedAdded is set before the callback so that a panic inside
 		// SubscriberAdded itself still produces the balancing SubscriberRemoved.
 		hs.reportedAdded = true
@@ -387,7 +435,6 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 			hs.exitReason = ReasonServerClosed
 			return
 		}
-		hs.enc = NewEncoder(w, useGzip)
 
 		// The logic below works as follows:
 		// - Normally, the handler is reading from eventCh. Server.run() accesses this channel through sub.out
@@ -519,12 +566,10 @@ func (srv *Server) Handler(channel string) http.HandlerFunc {
 
 			case ev, ok := <-hs.readBatchCh:
 				if !ok { // end of batch
-					hs.flusher.Flush()
-					hs.readBatchCh = nil
 					readMainCh = eventCh
-					// DrainDuration is measured after the flush above, so it accounts
-					// for the batch's single flush rather than excluding it.
-					srv.traceReplayFinished(ctx, sub, hs.replayCount, hs.replayBytes, sinceOrZero(hs.replayStart), false)
+					if !hs.finishReplayBatch() {
+						break ReadLoop
+					}
 					continue
 				}
 
