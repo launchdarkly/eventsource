@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"testing"
@@ -118,4 +119,26 @@ func TestEncoderCanWriteToWriterWithOrWithoutWriteStringMethod(t *testing.T) {
 
 	t.Run("with WriteString", func(t *testing.T) { doTest(t, true) })
 	t.Run("without WriteString", func(t *testing.T) { doTest(t, false) })
+}
+
+type failingWriter struct{ err error }
+
+func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestEncoderKeepsTheWriteErrorInTheChain(t *testing.T) {
+	writeErr := errors.New("write failed")
+	for _, tc := range []struct {
+		name       string
+		ec         eventOrComment
+		compressed bool
+	}{
+		{"event", &publication{id: "1", data: "aaa"}, false},
+		{"comment", comment{value: "aaa"}, false},
+		{"gzip event", &publication{id: "1", data: "aaa"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := NewEncoder(failingWriter{writeErr}, tc.compressed).Encode(tc.ec)
+			assert.True(t, errors.Is(err, writeErr), "got %v", err)
+		})
+	}
 }

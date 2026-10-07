@@ -48,23 +48,23 @@ func (enc *Encoder) Encode(ec eventOrComment) error {
 			}
 			for _, s := range strings.Split(value, "\n") {
 				if _, err := io.WriteString(enc.w, prefix); err != nil {
-					return fmt.Errorf("eventsource encode: %v", err)
+					return fmt.Errorf("eventsource encode: %w", err)
 				}
 				if _, err := io.WriteString(enc.w, s); err != nil {
-					return fmt.Errorf("eventsource encode: %v", err)
+					return fmt.Errorf("eventsource encode: %w", err)
 				}
 				if _, err := io.WriteString(enc.w, "\n"); err != nil {
-					return fmt.Errorf("eventsource encode: %v", err)
+					return fmt.Errorf("eventsource encode: %w", err)
 				}
 			}
 		}
 		if _, err := io.WriteString(enc.w, "\n"); err != nil {
-			return fmt.Errorf("eventsource encode: %v", err)
+			return fmt.Errorf("eventsource encode: %w", err)
 		}
 	case comment:
 		line := ":" + item.value + "\n"
 		if _, err := io.WriteString(enc.w, line); err != nil {
-			return fmt.Errorf("eventsource encode: %v", err)
+			return fmt.Errorf("eventsource encode: %w", err)
 		}
 	default:
 		// Logs the type (%T) and not the content, which may contain sensitive data.
