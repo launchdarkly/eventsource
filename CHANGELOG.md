@@ -2,6 +2,14 @@
 
 All notable changes to the project will be documented in this file. This project adheres to [Semantic Versioning](http://semver.org).
 
+## [1.14.1](https://github.com/launchdarkly/eventsource/compare/v1.14.0...v1.14.1) (2026-10-07)
+
+
+### Bug Fixes
+
+* Keep the write error in the chain of Encoder errors ([#81](https://github.com/launchdarkly/eventsource/issues/81)) ([49bd77d](https://github.com/launchdarkly/eventsource/commit/49bd77df9a8c839fe5f7d1f6f89c6ac09a70e8c6))
+* **test:** Stop TestServerHandlesLoadsOfPendingTasks deadlocking ([#76](https://github.com/launchdarkly/eventsource/issues/76)) ([d51d9b0](https://github.com/launchdarkly/eventsource/commit/d51d9b0e943d5f1e33e281b8dd260176393ee012))
+
 ## [1.14.0](https://github.com/launchdarkly/eventsource/compare/v1.13.0...v1.14.0) (2026-08-18)
 
 
