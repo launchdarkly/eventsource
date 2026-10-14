@@ -47,9 +47,8 @@ func TestEncodeComment(t *testing.T) {
 	buf := new(bytes.Buffer)
 	enc := NewEncoder(buf, false)
 	text := "This is a comment"
-	comm := comment{value: "This is a comment"}
 	expected := ":" + text + "\n"
-	if err := enc.Encode(comm); err != nil {
+	if err := enc.Encode(Comment(text)); err != nil {
 		t.Fatal(err)
 	}
 	if buf.String() != expected {
