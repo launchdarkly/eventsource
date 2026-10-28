@@ -2,6 +2,13 @@
 
 All notable changes to the project will be documented in this file. This project adheres to [Semantic Versioning](http://semver.org).
 
+## [1.14.2](https://github.com/launchdarkly/eventsource/compare/v1.14.1...v1.14.2) (2026-10-28)
+
+
+### Bug Fixes
+
+* Prevent a leaked connection when Restart is called during a pending reconnect ([#82](https://github.com/launchdarkly/eventsource/issues/82)) ([f17bdd9](https://github.com/launchdarkly/eventsource/commit/f17bdd9eb4c30b62e9842f02b7182b92b44dade3))
+
 ## [1.14.1](https://github.com/launchdarkly/eventsource/compare/v1.14.0...v1.14.1) (2026-10-07)
 
 
