@@ -397,6 +397,12 @@ NewStream:
 		for {
 			select {
 			case <-stream.restarter:
+				// A nil reader means that a retry is already scheduled. Do not schedule another one.
+				// A second retry makes connect run twice, and the second connection replaces the
+				// first one without closing it.
+				if r == nil {
+					continue
+				}
 				discardCurrentStream()
 				scheduleRetry()
 				continue NewStream
