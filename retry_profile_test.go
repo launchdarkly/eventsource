@@ -131,7 +131,7 @@ func TestResetTrumpsActivation(t *testing.T) {
 
 	t0 := time.Now()
 	// Establish a healthy period longer than resetInterval.
-	r.SetGoodSince(t0)
+	r.SetGoodSinceIfUnset(t0)
 
 	// Caller activates ext (immediate).
 	r.activateProfile(ext)
@@ -160,7 +160,7 @@ func TestPersistentFailuresRampIntoExtended(t *testing.T) {
 	r := mkRetryDelayWithProfiles(def, []*RetryProfile{ext}, resetInterval, 0)
 
 	t0 := time.Now()
-	r.SetGoodSince(t0)
+	r.SetGoodSinceIfUnset(t0)
 
 	// Failure #1: after healthy period. Reset trumps activation.
 	r.activateProfile(ext)
@@ -204,7 +204,7 @@ func TestResetZerosAllProfilesCounters(t *testing.T) {
 
 	// Return to default, healthy period elapses, then failure triggers reset.
 	r.activateProfile(DefaultProfile)
-	r.SetGoodSince(t0)
+	r.SetGoodSinceIfUnset(t0)
 	d := r.NextRetryDelay(t0.Add(resetInterval))
 	assert.Equal(t, time.Second, d) // default's counter zeroed
 
@@ -288,7 +288,7 @@ func TestBaseDelayMutationPersistsAcrossReset(t *testing.T) {
 	assert.Equal(t, time.Millisecond*500, d)
 
 	// Enter healthy state, then trigger reset.
-	r.SetGoodSince(t0.Add(time.Second))
+	r.SetGoodSinceIfUnset(t0.Add(time.Second))
 	d = r.NextRetryDelay(t0.Add(time.Second + resetInterval))
 
 	// Reset zeroed the counter, but the 500ms baseDelay persists.
@@ -468,7 +468,7 @@ func TestMultipleRegisteredProfilesAllTrackedByResetAndApplyRetryTime(t *testing
 
 	// Reset. All three counters must be zero.
 	r.activateProfile(DefaultProfile)
-	r.SetGoodSince(t0)
+	r.SetGoodSinceIfUnset(t0)
 	_ = r.NextRetryDelay(t0.Add(resetInterval))
 
 	// Confirm every profile's counter was zeroed by activating each and observing
@@ -587,4 +587,74 @@ func TestRetryProfileJitterZeroOverridesPositiveDefault(t *testing.T) {
 	d := r2.NextRetryDelay(t0)
 	assert.Less(t, int64(d), int64(time.Second), "with inherited jitter the delay should be less than base")
 	assert.Greater(t, int64(d), int64(time.Millisecond*500), "with 50%% jitter cap the delay should still be at least half of base")
+}
+
+// The healthy-operation reset interval runs from the first payload of a connection, not the most
+// recent one. A busy stream that is up past the reset interval and drops shortly
+// after an event must still reset to the default profile with zeroed counters.
+func TestResetIntervalMeasuredFromFirstEventNotLastEvent(t *testing.T) {
+	def := NewRetryProfile(
+		RetryProfileBaseDelay(time.Second),
+		RetryProfileMaxDelay(time.Minute),
+	)
+	ext := NewRetryProfile(
+		RetryProfileBaseDelay(time.Minute*5),
+		RetryProfileMaxDelay(time.Hour),
+	)
+	resetInterval := time.Second * 30
+	r := mkRetryDelayWithProfiles(def, []*RetryProfile{ext}, resetInterval, 0)
+
+	t0 := time.Now()
+
+	// Earlier failures leave the stream in the extended profile with nonzero counters.
+	_ = r.NextRetryDelay(t0)
+	r.activateProfile(ext)
+	_ = r.NextRetryDelay(t0)
+	_ = r.NextRetryDelay(t0)
+
+	// The next connection delivers an event every second for twice the reset interval.
+	connected := t0.Add(time.Minute)
+	last := connected
+	for elapsed := time.Duration(0); elapsed <= resetInterval*2; elapsed += time.Second {
+		last = connected.Add(elapsed)
+		r.SetGoodSinceIfUnset(last)
+	}
+
+	// The connection drops 100ms after its last event. The error handler keeps ext active, as it
+	// does for ordinary failures, but the reset still fires: default profile, counters zeroed.
+	r.activateProfile(ext)
+	d := r.NextRetryDelay(last.Add(time.Millisecond * 100))
+	assert.Same(t, def, r.activeProfile())
+	assert.Equal(t, time.Second, d)
+
+	r.activateProfile(ext)
+	assert.Equal(t, time.Minute*5, r.NextRetryDelay(last.Add(time.Millisecond*200)))
+}
+
+// A connection that drops before the reset interval has elapsed since its first event does not
+// reset, however many events it delivered.
+func TestNoResetWhenDroppedBeforeResetIntervalSinceFirstEvent(t *testing.T) {
+	def := NewRetryProfile(
+		RetryProfileBaseDelay(time.Second),
+		RetryProfileMaxDelay(time.Minute),
+	)
+	ext := NewRetryProfile(
+		RetryProfileBaseDelay(time.Minute*5),
+		RetryProfileMaxDelay(time.Hour),
+	)
+	resetInterval := time.Second * 30
+	r := mkRetryDelayWithProfiles(def, []*RetryProfile{ext}, resetInterval, 0)
+
+	t0 := time.Now()
+	r.activateProfile(ext)
+	_ = r.NextRetryDelay(t0) // ext: 5m (n 0→1)
+
+	connected := t0.Add(time.Minute)
+	for elapsed := time.Duration(0); elapsed < resetInterval; elapsed += time.Second {
+		r.SetGoodSinceIfUnset(connected.Add(elapsed))
+	}
+
+	d := r.NextRetryDelay(connected.Add(resetInterval - time.Millisecond))
+	assert.Same(t, ext, r.activeProfile())
+	assert.Equal(t, time.Minute*10, d)
 }

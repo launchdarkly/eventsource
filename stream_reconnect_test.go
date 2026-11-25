@@ -286,3 +286,40 @@ func TestStreamBackoffCanUseResetInterval(t *testing.T) {
 	d2 := retry.NextRetryDelay(time.Now().Add(resetInterval))
 	assert.Equal(t, baseDelay, d2)
 }
+
+func TestStreamResetIntervalIsMeasuredFromFirstEvent(t *testing.T) {
+	// The stream receives events more often than the reset interval for longer than the reset
+	// interval. A failure right after the last event must still reset the backoff, because the
+	// healthy period started with the first event.
+	streamHandler, streamControl := httphelpers.SSEHandler(nil)
+	defer streamControl.Close()
+	httpServer := httptest.NewServer(streamHandler)
+	defer httpServer.Close()
+
+	baseDelay := time.Millisecond
+	resetInterval := time.Millisecond * 200
+	stream := mustSubscribe(t, httpServer.URL,
+		StreamOptionInitialRetry(baseDelay),
+		StreamOptionUseBackoff(time.Hour),
+		StreamOptionRetryResetInterval(resetInterval))
+	defer stream.Close()
+
+	retry := stream.getRetryDelayStrategy()
+
+	// Advance the backoff counter before the stream becomes good.
+	_ = retry.NextRetryDelay(time.Now())
+	_ = retry.NextRetryDelay(time.Now())
+
+	event := httphelpers.SSEEvent{ID: "123"}
+	streamControl.Enqueue(event)
+	<-stream.Events
+	firstEvent := time.Now()
+	for time.Since(firstEvent) < resetInterval+resetInterval/2 {
+		time.Sleep(resetInterval / 4)
+		streamControl.Enqueue(event)
+		<-stream.Events
+	}
+
+	d := retry.NextRetryDelay(time.Now())
+	assert.Equal(t, baseDelay, d)
+}

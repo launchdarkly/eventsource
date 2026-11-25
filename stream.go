@@ -419,7 +419,7 @@ NewStream:
 					stream.retryDelay.ApplyRetryTime(clampServerDirectedRetry(pub.Retry()))
 				}
 				stream.lastEventID = pub.lastEventID
-				stream.retryDelay.SetGoodSince(time.Now())
+				stream.retryDelay.SetGoodSinceIfUnset(time.Now())
 				select {
 				case stream.Events <- ev:
 				case <-stream.closer:
