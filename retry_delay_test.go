@@ -163,21 +163,21 @@ func TestBackoffResetInterval(t *testing.T) {
 	resetInterval := time.Second * 45
 	r := mkRetryDelay(d0, resetInterval, max, 0, 0)
 	t0 := time.Now().Add(-time.Minute)
-	r.SetGoodSince(t0)
+	r.SetGoodSinceIfUnset(t0)
 
 	t1 := t0.Add(time.Second)
 	d1 := r.NextRetryDelay(t1)
 	assert.Equal(t, d0, d1)
 
 	t2 := t1.Add(d1)
-	r.SetGoodSince(t2)
+	r.SetGoodSinceIfUnset(t2)
 
 	t3 := t2.Add(time.Second * 10)
 	d2 := r.NextRetryDelay(t3)
 	assert.Equal(t, d0*2, d2)
 
 	t4 := t3.Add(d2)
-	r.SetGoodSince(t4)
+	r.SetGoodSinceIfUnset(t4)
 
 	t5 := t4.Add(resetInterval)
 	d3 := r.NextRetryDelay(t5)

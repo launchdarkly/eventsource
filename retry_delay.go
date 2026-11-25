@@ -245,10 +245,15 @@ func (r *retryDelayStrategy) NextRetryDelay(currentTime time.Time) time.Duration
 	return delay
 }
 
-// SetGoodSince marks the current state as "good" and records the time. See comments on the backoff type.
-func (r *retryDelayStrategy) SetGoodSince(goodSince time.Time) {
+// SetGoodSinceIfUnset marks the current state as "good" from goodSince, unless it is already good.
+// The reset interval starts at the first payload of a connection and runs while the connection
+// stays healthy. Later payloads on the same connection do not move the start time. NextRetryDelay
+// clears the state, so the first payload of the next connection starts a new healthy period.
+func (r *retryDelayStrategy) SetGoodSinceIfUnset(goodSince time.Time) {
 	r.lock.Lock()
-	r.goodSince = goodSince
+	if r.goodSince.IsZero() {
+		r.goodSince = goodSince
+	}
 	r.lock.Unlock()
 }
 

@@ -172,13 +172,14 @@ func (o retryResetIntervalOption) apply(s *streamOptions) error {
 }
 
 // StreamOptionRetryResetInterval returns an option that sets the minimum amount of time that a
-// connection must stay open before the Stream resets its backoff delay. This is only relevant if
-// backoff is enabled (see StreamOptionUseBackoff).
+// connection must remain healthy before the Stream resets its backoff delay. The interval is measured
+// from the first event received on the connection; later events do not restart it. This is only
+// relevant if backoff is enabled (see StreamOptionUseBackoff).
 //
-// If a connection fails before the threshold has elapsed, the delay before reconnecting will be
-// greater than the last delay; if it fails after the threshold, the delay will start over at the
-// the initial minimum value. This prevents long delays from occurring on connections that are only
-// rarely restarted.
+// If a connection fails before the threshold has elapsed since its first event, the delay before
+// reconnecting will be greater than the last delay; if it fails after the threshold, the delay will
+// start over at the initial minimum value. This prevents long delays from occurring on connections
+// that are only rarely restarted.
 //
 // The default value is DefaultRetryResetInterval.
 func StreamOptionRetryResetInterval(retryResetInterval time.Duration) StreamOption {
