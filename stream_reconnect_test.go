@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/launchdarkly/go-test-helpers/v3/httphelpers"
 )
@@ -311,13 +312,19 @@ func TestStreamResetIntervalIsMeasuredFromFirstEvent(t *testing.T) {
 	_ = retry.NextRetryDelay(time.Now())
 
 	event := httphelpers.SSEEvent{ID: "123"}
-	streamControl.Enqueue(event)
-	<-stream.Events
+	sendAndReceive := func() {
+		streamControl.Enqueue(event)
+		select {
+		case <-stream.Events:
+		case <-time.After(time.Second * 2):
+			require.FailNow(t, "timed out waiting for event")
+		}
+	}
+	sendAndReceive()
 	firstEvent := time.Now()
 	for time.Since(firstEvent) < resetInterval+resetInterval/2 {
 		time.Sleep(resetInterval / 4)
-		streamControl.Enqueue(event)
-		<-stream.Events
+		sendAndReceive()
 	}
 
 	d := retry.NextRetryDelay(time.Now())
