@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/launchdarkly/go-test-helpers/v3/httphelpers"
 )
@@ -243,10 +244,9 @@ func TestStreamActivateProfilePublicMethodReachesStrategy(t *testing.T) {
 }
 
 func TestStreamBackoffCanUseResetInterval(t *testing.T) {
-	// In this test, streamHandler1 sends an event, then breaks the connection too soon for the delay to be
-	// reset. We ask the retryDelayStrategy to compute the next delay; it should be higher than the initial
-	// value. Then streamHandler2 sends an event, and we verify that the next delay that *would* come from the
-	// retryDelayStrategy if the reset interval elapsed would be the initial delay, not a higher value.
+	// streamHandler1 sends an event, then breaks the connection before the reset interval elapses.
+	// streamHandler2 sends an event after the reconnect. Then we verify that the next delay would be
+	// the initial delay if the reset interval elapsed after the event on the second connection.
 	streamHandler1, streamControl1 := httphelpers.SSEHandler(nil)
 	defer streamControl1.Close()
 	streamHandler2, streamControl2 := httphelpers.SSEHandler(nil)
@@ -259,30 +259,44 @@ func TestStreamBackoffCanUseResetInterval(t *testing.T) {
 	stream := mustSubscribe(t, httpServer.URL,
 		StreamOptionInitialRetry(baseDelay),
 		StreamOptionUseBackoff(time.Hour),
-		StreamOptionRetryResetInterval(resetInterval))
+		StreamOptionRetryResetInterval(resetInterval),
+		// The test does not read stream.Errors. Without this handler, the stream blocks when it reports
+		// the end of the first connection, and it does not reconnect.
+		StreamOptionErrorHandler(func(error) StreamErrorHandlerResult { return StreamErrorHandlerResult{} }))
 	defer stream.Close()
 
 	retry := stream.getRetryDelayStrategy()
 
-	// The first stream connection sends an event, so the stream state becomes "good".
-	event := httphelpers.SSEEvent{ID: "123"}
-	streamControl1.Enqueue(event)
+	receiveEvent := func(expectedID string) {
+		t.Helper()
+		select {
+		case ev := <-stream.Events:
+			assert.Equal(t, expectedID, ev.Id())
+		case <-time.After(timeToWaitForEvent):
+			require.FailNow(t, "timed out waiting for event", "expected event ID %q", expectedID)
+		}
+	}
 
-	// We ask the retryDelayStrategy to compute the next two delay values; they should show an increase.
+	// The first connection sends an event. Read it, so the stream state is "good".
+	streamControl1.Enqueue(httphelpers.SSEEvent{ID: "1"})
+	receiveEvent("1")
+
+	// Compute the next two delays. The reset interval has not elapsed, so the delay increases.
 	d0 := retry.NextRetryDelay(time.Now())
 	d1 := retry.NextRetryDelay(time.Now())
 	assert.Equal(t, baseDelay, d0)
 	assert.Equal(t, baseDelay*2, d1)
 
-	// The first connection is broken; the state becomes "bad".
+	// Break the first connection. The stream reconnects and the delay increases again.
 	streamControl1.EndAll()
 
-	// After it reconnects, the second connection receives an event and the state becomes "good" again.
-	streamControl2.Enqueue(event)
-	<-stream.Events
+	// The second connection sends an event. The event ID shows that the event came from the second
+	// connection. The stream state is "good" again.
+	streamControl2.Enqueue(httphelpers.SSEEvent{ID: "2"})
+	receiveEvent("2")
 
-	// Now, ask the retryDelayStrategy what the next delay value would be if the next attempt happened
-	// 200 milliseconds from now (assuming the stream remained good). It should go back to baseDelay.
+	// Compute the delay as if the next attempt occurs one reset interval from now. The state stayed
+	// "good" for the full interval, so the delay goes back to baseDelay.
 	d2 := retry.NextRetryDelay(time.Now().Add(resetInterval))
 	assert.Equal(t, baseDelay, d2)
 }
