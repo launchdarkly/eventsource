@@ -1,6 +1,8 @@
 package eventsource
 
 import (
+	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -329,4 +331,112 @@ func TestStreamResetIntervalIsMeasuredFromFirstEvent(t *testing.T) {
 
 	d := retry.NextRetryDelay(time.Now())
 	assert.Equal(t, baseDelay, d)
+}
+
+// delayLogger sends each reconnect delay that the stream logs to a channel.
+type delayLogger struct {
+	delays chan time.Duration
+}
+
+func (l delayLogger) Println(...interface{}) {}
+
+func (l delayLogger) Printf(format string, args ...interface{}) {
+	if format == "Reconnecting in %0.4f secs" && len(args) == 1 {
+		if secs, ok := args[0].(float64); ok {
+			l.delays <- time.Duration(secs * float64(time.Second)).Round(time.Millisecond)
+		}
+	}
+}
+
+func TestStreamHealthyPeriodRestartsOnEachConnection(t *testing.T) {
+	// Each connection starts its own healthy period at its first event.
+	// Connection 1 fails with no event, so the backoff counter climbs.
+	// Connection 2 stays healthy longer than the reset interval, so its drop resets the backoff.
+	// Connection 3 drops soon after its first event. Connection 2 started long ago, but that
+	// must not count, so the backoff climbs again.
+	immediateEOF := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+	})
+	streamHandler2, streamControl2 := httphelpers.SSEHandler(nil)
+	defer streamControl2.Close()
+	streamHandler3, streamControl3 := httphelpers.SSEHandler(nil)
+	defer streamControl3.Close()
+	streamHandler4, streamControl4 := httphelpers.SSEHandler(nil)
+	defer streamControl4.Close()
+	handler, requestsCh := httphelpers.RecordingHandler(httphelpers.SequentialHandler(
+		immediateEOF, streamHandler2, streamHandler3, streamHandler4))
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+
+	// The reset interval is long compared to the delays and to scheduling noise under -race.
+	baseDelay := 10 * time.Millisecond
+	resetInterval := 300 * time.Millisecond
+	waitTime := 2 * time.Second
+	logger := delayLogger{delays: make(chan time.Duration, 10)}
+	stream, err := SubscribeWithURL(httpServer.URL,
+		StreamOptionInitialRetry(baseDelay),
+		StreamOptionUseBackoff(time.Hour),
+		StreamOptionRetryResetInterval(resetInterval),
+		StreamOptionLogger(logger),
+		StreamOptionErrorHandler(func(error) StreamErrorHandlerResult { return StreamErrorHandlerResult{} }))
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer stream.Close()
+
+	awaitRequest := func(name string) {
+		t.Helper()
+		select {
+		case <-requestsCh:
+		case <-time.After(waitTime):
+			t.Fatalf("timed out waiting for %s", name)
+		}
+	}
+	awaitDelay := func(name string) time.Duration {
+		t.Helper()
+		select {
+		case d := <-logger.delays:
+			return d
+		case <-time.After(waitTime):
+			t.Fatalf("timed out waiting for reconnect delay after %s", name)
+			return 0
+		}
+	}
+	sendAndReceive := func(control httphelpers.SSEStreamControl, id string) {
+		t.Helper()
+		control.Enqueue(httphelpers.SSEEvent{ID: id})
+		select {
+		case ev := <-stream.Events:
+			assert.Equal(t, id, ev.Id())
+		case <-time.After(waitTime):
+			t.Fatalf("timed out waiting for event %s", id)
+		}
+	}
+
+	// Connection 1 ends with no event. This is a failure with no healthy period.
+	awaitRequest("connection 1")
+	assert.Equal(t, baseDelay, awaitDelay("connection 1"))
+
+	// Connection 2 sends events more often than the reset interval, for longer than the reset
+	// interval. The drop comes right after the last event. The backoff resets because the
+	// healthy period started at the first event.
+	awaitRequest("connection 2")
+	sendAndReceive(streamControl2, "2-0")
+	firstEvent := time.Now()
+	for i := 1; time.Since(firstEvent) < resetInterval+resetInterval/2; i++ {
+		time.Sleep(resetInterval / 4)
+		sendAndReceive(streamControl2, fmt.Sprintf("2-%d", i))
+	}
+	streamControl2.EndAll()
+	assert.Equal(t, baseDelay, awaitDelay("connection 2"), "healthy connection must reset the backoff")
+
+	// Connection 3 sends one event and drops at once. Its healthy period is too short, so the
+	// backoff does not reset and the delay doubles.
+	awaitRequest("connection 3")
+	sendAndReceive(streamControl3, "3-0")
+	streamControl3.EndAll()
+	assert.Equal(t, baseDelay*2, awaitDelay("connection 3"), "short connection must not reset the backoff")
+
+	awaitRequest("connection 4")
 }
